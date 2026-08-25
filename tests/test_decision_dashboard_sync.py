@@ -73,6 +73,14 @@ def test_health_allows_initial_database_upload(tmp_path, monkeypatch):
     assert response.json["status"] == "initializing"
 
 
+def test_health_allows_initial_variable_configuration(monkeypatch):
+    monkeypatch.delenv("LITET_DB_PATH", raising=False)
+    from decision_dashboard_v2.app import app
+    response = app.test_client().get("/health")
+    assert response.status_code == 200
+    assert response.json["status"] == "initializing"
+
+
 def test_admin_page_exposes_sync_controls(sync_client):
     client, _ = sync_client
     response = client.get("/admin")

@@ -68,7 +68,9 @@ def health():
     """Railway health check that also verifies the analytics database."""
     db_path = os.getenv("LITET_DB_PATH")
     if not db_path:
-        return {"status": "error", "reason": "LITET_DB_PATH is not configured"}, 503
+        # Keep the first deployment reachable so its volume and variables can
+        # be configured through Railway before the initial snapshot upload.
+        return {"status": "initializing", "reason": "database path is not configured"}
     if not Path(db_path).exists():
         # The first deploy must stay reachable long enough to receive its
         # initial authenticated snapshot.
