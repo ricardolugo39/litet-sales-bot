@@ -943,6 +943,50 @@ def executive_actions(period_start, period_end, brand, ranked_actions):
             "evidence":f"Ordered-sales run rate fell; approximately ${top['estimated_30d_impact']:,.0f} of 30-day ordered revenue is at risk."}
 
 
+def executive_diagnosis(period_start, period_end, brand, ceo_action):
+    """Connect performance, objective, causes, actions and safeguards."""
+    from datetime import date
+    import calendar
+    metrics=overview(period_start,period_end,brand)
+    trend=monthly_trend(brand)
+    current=next((r for r in reversed(trend) if r["period_start"][:7]==period_start[:7]),None)
+    prior=next((r for r in reversed(trend) if not r["is_partial"] and (not current or r["period_start"]<current["period_start"])),None)
+    current_end=date.fromisoformat(current["period_end"]) if current else date.fromisoformat(period_end)
+    current_start=date.fromisoformat(current["period_start"]) if current else date.fromisoformat(period_start)
+    observed_days=(current_end-current_start).days+1
+    month_days=calendar.monthrange(current_end.year,current_end.month)[1]
+    factor=month_days/observed_days if current and current["is_partial"] else 1
+    def change(key,pace=False):
+        if not current or not prior or not prior.get(key): return None
+        value=(current.get(key) or 0)*(factor if pace else 1)
+        return value/prior[key]-1
+    sales_change=change("ordered_sales",True); traffic_change=change("sessions",True)
+    conversion_change=change("conversion")
+    floor=.10 if brand=="Litet" else .05
+    mode="Growth and adoption" if brand=="Litet" else "Seasonal scale and availability"
+    causes=[]
+    for label,value in (("Traffic",traffic_change),("Conversion",conversion_change),("Sales pace",sales_change)):
+        if value is not None: causes.append({"label":label,"change":value})
+    margin=metrics.get("contribution_margin")
+    status=("Capacity to invest" if margin is not None and margin>=floor else "Below growth constraint")
+    if brand=="Has10" and margin is not None and margin<floor: status="Seasonal scale is not covering the contribution floor"
+    protections=[{"title":"Avoid broad traffic cuts","reason":"Evaluate total sales, sessions, conversion and organic rank before reducing strategic category coverage."}]
+    if ceo_action.get("productive_terms"):
+        protections.append({"title":"Preserve proven demand","reason":f"{len(ceo_action['productive_terms'])} productive search terms have conversion evidence in the selected period."})
+    priority_actions={p["action"] for p in ceo_action.get("steps",[])[:3]}
+    for step in ceo_action.get("steps",[]):
+        if (step["action"] not in priority_actions and
+                step["action"].startswith(("Keep ","Hold ","Do not "))):
+            protections.append({"title":step["action"],"reason":step["why"]})
+    return {"brand":brand,"mode":mode,"floor":floor,"status":status,
+            "sales_pace_change":sales_change,"traffic_pace_change":traffic_change,
+            "conversion_change":conversion_change,"causes":causes,
+            "prior_label":prior["period_start"][:7] if prior else None,
+            "confidence":"Medium" if current and current["is_partial"] else "High",
+            "priorities":ceo_action.get("steps",[])[:3],"protections":protections,
+            "review_window":"Review interventions after 7 complete days; confirm at 14 days."}
+
+
 def pricing_case(period_start, period_end, brand, asin=None):
     products=product_diagnostics(period_start,period_end,brand)
     product=next((p for p in products if p["asin"]==asin),None) if asin else None

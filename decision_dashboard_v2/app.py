@@ -9,12 +9,12 @@ from pathlib import Path
 from flask import Flask, after_this_request, redirect, render_template, request, send_file, url_for
 
 if __package__:
-    from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, family_diagnostics, keyword_opportunities, keyword_playbook,
+    from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                             market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
                             ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics)
     from .interventions import recent_interventions, record_pricing_case
 else:  # Supports `python app.py` from this directory.
-    from analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, family_diagnostics, keyword_opportunities, keyword_playbook,
+    from analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                            market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
                            ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics)
     from interventions import recent_interventions, record_pricing_case
@@ -175,7 +175,8 @@ def common(page):
 @app.get("/")
 def executive():
     ctx=common("executive"); start,end,brand=ctx["start"],ctx["end"],ctx["brand"]; actions,prior=action_queue(start,end,brand)
-    ctx.update(actions=actions,prior_period=prior,trend=monthly_trend(brand),pnl=pnl_statement(start,end,brand),costs=cost_diagnosis(start,end,brand),brands=brand_split(start,end),market=market_context(brand),ceo_action=executive_actions(start,end,brand,actions))
+    ceo_action=executive_actions(start,end,brand,actions)
+    ctx.update(actions=actions,prior_period=prior,trend=monthly_trend(brand),pnl=pnl_statement(start,end,brand),costs=cost_diagnosis(start,end,brand),brands=brand_split(start,end),market=market_context(brand),ceo_action=ceo_action,diagnosis=executive_diagnosis(start,end,brand,ceo_action))
     return render_template("dashboard.html",**ctx)
 
 @app.get("/products")

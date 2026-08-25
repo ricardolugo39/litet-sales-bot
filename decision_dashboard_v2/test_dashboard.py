@@ -25,7 +25,8 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"HASTEN", response.data)
         self.assertIn(b"TaCoS", response.data)
-        self.assertIn(b"Recommended action", response.data)
+        self.assertIn(b"Growth and adoption", response.data)
+        self.assertIn(b"Three priorities", response.data)
         self.assertIn(b"white cycling socks", response.data)
         self.assertIn(b"Do not change PPC because of this 3-pack decline", response.data)
         self.assertIn(b"Estimated P&amp;L", response.data)
@@ -40,13 +41,25 @@ class DashboardTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Has10", response.data)
-        self.assertIn(b"Execute now", response.data)
+        self.assertIn(b"Seasonal scale and availability", response.data)
+        self.assertIn(b"Three priorities", response.data)
         self.assertIn(b"orange cleat covers", response.data)
         self.assertIn(b"Keep the $13.99 base price", response.data)
         self.assertIn(b"Why Amazon costs are 45.1%", response.data)
         self.assertIn(b"Maximum ads to break even", response.data)
         self.assertIn(b"Bring TaCoS below 30%", response.data)
         self.assertNotIn(b"white cycling socks", response.data)
+
+    def test_homepage_exposes_brand_specific_operating_modes(self):
+        litet=self.client.get("/?brand=Litet")
+        has10=self.client.get("/?brand=Has10")
+        self.assertIn(b"Growth and adoption",litet.data)
+        self.assertIn(b"10.0% operating floor",litet.data)
+        self.assertIn(b"Seasonal scale and availability",has10.data)
+        self.assertIn(b"5.0% operating floor",has10.data)
+        for response in (litet,has10):
+            self.assertIn(b"What not to change",response.data)
+            self.assertIn(b"Medium confidence",response.data)
 
     def test_has10_latest_period_handles_queries_without_sales(self):
         response = self.client.get(
