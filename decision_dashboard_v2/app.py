@@ -137,6 +137,11 @@ def money(value):
     if value is None: return "—"
     return f"-${abs(value):,.0f}" if value < 0 else f"${value:,.0f}"
 
+@app.template_filter("money2")
+def money2(value):
+    if value is None: return "—"
+    return f"-${abs(value):,.2f}" if value < 0 else f"${value:,.2f}"
+
 @app.template_filter("compact_money")
 def compact_money(value):
     if value is None: return "—"

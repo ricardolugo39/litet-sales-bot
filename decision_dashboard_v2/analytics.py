@@ -605,10 +605,18 @@ def keyword_playbook(period_start, period_end, brand):
             target["decision"]=f"Reduce bid {cut}%"; target["reason"]="Target-level ACoS is above the sustainable range; use a measured cut where organic rank is valuable."
         elif target["acos"] is not None and target["acos"]>.50:
             target["decision"]="Reduce bid 10%"; target["reason"]="The target converts, but the full target total is above the desired economics."
+        elif (target["acos"] is not None and target["acos"]<=.30 and
+              target["orders"]>=3 and target["clicks"]>=12 and
+              target["modeled_max_cpc"] is not None and
+              target["modeled_max_cpc"]>=target["cpc"]*1.15 and not strong_organic):
+            target["decision"]="Increase bid 10%"
+            target["reason"]="Conversion is efficient with sufficient volume, and modeled CPC headroom is at least 15%; increase cautiously and review after 7 days."
         elif target["acos"] is not None and target["acos"]<=.30 and target["orders"]>=2:
-            target["decision"]="Hold bid"; target["reason"]="Target-level conversion is efficient; preserve while monitoring total sales."
+            target["decision"]="Hold bid"; target["reason"]="Conversion is efficient, but the evidence or strategic need does not support paying more yet."
         else:
             target["decision"]="Monitor"; target["reason"]="No target-level bid change is supported yet."
+        target["confidence"]=("High" if target["clicks"]>=20 and target["orders"]>=5
+                              else "Medium" if target["clicks"]>=8 else "Low")
         target_plan.append(target)
     target_plan.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["target"].lower()))
     campaign_map={}
@@ -620,7 +628,7 @@ def keyword_playbook(period_start, period_end, brand):
         campaign["spend"]+=target["spend"] or 0
         campaign["orders"]+=target["orders"] or 0
         campaign["ad_sales"]+=target["ad_sales"] or 0
-        if target["decision"].startswith("Reduce"):
+        if target["decision"].startswith(("Reduce","Increase")):
             campaign["action_count"]+=1
     campaign_groups=[]
     for campaign in campaign_map.values():

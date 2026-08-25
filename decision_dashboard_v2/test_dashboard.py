@@ -127,7 +127,7 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Targeting keyword", response.data)
         self.assertIn(b"Targeting decisions", response.data)
         self.assertIn(b"Customer search-term evidence", response.data)
-        self.assertIn(b"$237", response.data)
+        self.assertIn(b"$236.93", response.data)
         self.assertIn(b"Keyword opportunities", response.data)
         self.assertIn(b"aero cycling socks", response.data)
         self.assertIn(b"Where Litet can close the visibility gap", response.data)
@@ -151,6 +151,10 @@ class DashboardTest(unittest.TestCase):
         self.assertTrue(any(c["open"] for c in playbook["campaigns"]))
         self.assertEqual(sum(len(c["targets"]) for c in playbook["campaigns"]),
                          len(playbook["targets"]))
+        self.assertTrue(any(r["decision"].startswith("Increase")
+                            for r in playbook["targets"]))
+        self.assertTrue(all(r["confidence"] in {"Low","Medium","High"}
+                            for r in playbook["targets"]))
 
     def test_all_v2_pages(self):
         query = "?brand=Litet&period=2026-08-01%7C2026-08-16"
