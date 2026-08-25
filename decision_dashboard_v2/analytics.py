@@ -5,9 +5,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-try:
+if __package__:
     from .competitor_data import CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
-except ImportError:  # Supports `python app.py` from this directory.
+else:  # Supports `python app.py` from this directory.
     from competitor_data import CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
 
 
