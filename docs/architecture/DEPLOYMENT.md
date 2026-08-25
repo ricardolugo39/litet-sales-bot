@@ -6,6 +6,10 @@ Railway runs one dashboard instance and mounts a persistent volume at `/data`.
 The canonical writable database is `/data/litet.db`. Local applications use the
 latest downloaded cache when offline; the cache is not a source of truth.
 
+Railway builds the root `Dockerfile`, which intentionally installs only
+`decision_dashboard_v2/requirements.txt`. The repository-wide requirements are
+reserved for the other local applications and are not part of this service.
+
 Required Railway variables:
 
 ```text
@@ -58,4 +62,3 @@ The local source database and offline cache provide recoverable snapshots. To
 restore Railway, point `LITET_DB_PATH` locally at the desired validated snapshot
 and rerun `scripts/sync_database.py`. The current Railway intervention table is
 preserved during restoration.
-
