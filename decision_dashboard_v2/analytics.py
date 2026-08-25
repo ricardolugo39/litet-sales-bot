@@ -456,7 +456,7 @@ def product_portfolio(period_start, period_end, brand):
         elif row["sessions"] >= 20 and row["units"] == 0:
             status, reason = "Act now", "Material traffic produced no orders; inspect the offer and variation placement."
         elif row["net_proceeds"] < 0 and row["ad_spend"] > 0:
-            status, reason = "Act now", "Advertising charges coincide with negative Amazon proceeds before COGS."
+            status, reason = "Watch", "Settlement review is required; this accounting signal is not permission to cut PPC."
         elif row["sessions"] < 10 and row["units"] < 2:
             status, reason = "Insufficient evidence", "Too little selected-period demand to support a product change."
         elif row["diagnosis"] == "Conversion weakness" or (row["sales_pace_change"] is not None and row["sales_pace_change"] < -.15):
@@ -466,6 +466,68 @@ def product_portfolio(period_start, period_end, brand):
         else:
             status, reason = "Healthy—no action", "No material product-level exception is supported by current evidence."
         row.update(status=status, status_rank=status_order[status], status_reason=reason)
+
+    with connect() as conn:
+        proven = conn.execute(
+            """SELECT search_term, SUM(ad_orders) orders, SUM(spend) spend, SUM(ad_sales) sales,
+                      CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos
+               FROM ppc_fact_clean
+               WHERE brand=? AND report_date BETWEEN ? AND ? AND TRIM(COALESCE(search_term,''))<>''
+               GROUP BY LOWER(TRIM(search_term))
+               HAVING SUM(ad_orders)>=2 AND SUM(ad_sales)>0 AND SUM(spend)/SUM(ad_sales)<=0.50
+               ORDER BY SUM(ad_orders) DESC, SUM(ad_sales) DESC LIMIT 3""",
+            (brand, period_start, period_end),
+        ).fetchall() if brand in {"Litet", "Has10"} else []
+    proven_terms = [dict(term) for term in proven]
+    hero = max(rows, key=lambda row: row["ad_spend"] or 0, default=None)
+    candidates = [row for row in rows if hero and row["asin"] != hero["asin"]
+                  and row["pack_type"] == hero["pack_type"] and row["sessions"] >= 25
+                  and row["units"] >= 3 and (row["days_cover"] or 0) >= 30]
+    candidate = max(candidates, key=lambda row: (row["conversion"] or 0, row["units"]), default=None)
+    term_names = ", ".join(f"‘{term['search_term']}’" for term in proven_terms) or "the proven queries on the PPC page"
+
+    for row in rows:
+        row["is_ppc_hero"] = bool(hero and row["asin"] == hero["asin"])
+        row["is_ppc_test_candidate"] = bool(candidate and row["asin"] == candidate["asin"])
+        row["average_order_value"] = row["ordered_sales"] / row["units"] if row["units"] else None
+        price_label = f"${row['average_order_value']:.2f}" if row["average_order_value"] else "the current price"
+        if row["inventory"] <= 0 and row["units"] > 0:
+            row["pricing_action"] = "Hold price; a price test is invalid while inventory is unavailable."
+            row["ppc_action"] = "Do not send additional paid traffic until FBA availability is restored."
+            row["measurement_plan"] = "After restock, require 7 complete days of sessions, units and conversion before changing either lever."
+        elif row["is_ppc_hero"]:
+            row["status_reason"] = (f"This ASIN carries the largest allocated ad charge and {row['units']:.0f} selected-period orders, so it remains the control for PPC changes.")
+            row["pricing_action"] = f"Hold approximately {price_label}; selected-period settlement does not support a price cut."
+            row["ppc_action"] = "Keep this ASIN as the primary PPC destination. Change only the campaign targets identified on the PPC page—not the entire campaign."
+            row["measurement_plan"] = "For each target change, compare 7 complete days of total units, sessions, CVR, organic rank and contribution; confirm at 14 days."
+        elif row["is_ppc_test_candidate"]:
+            row["status_reason"] = (f"It converted {(row['conversion'] or 0):.1%} from {row['sessions']:.0f} sessions and has approximately {row['days_cover']:.0f} days of cover—the strongest same-pack candidate outside the hero.")
+            row["pricing_action"] = f"Hold approximately {price_label} so the PPC test has one changing variable."
+            row["ppc_action"] = f"Test as a secondary advertised ASIN with 10–15% of the hero budget using EXACT {term_names}."
+            row["measurement_plan"] = "Run 7 complete days. Expand only if incremental sessions convert without reducing hero-ASIN units or total contribution."
+        elif row["sessions"] >= 40 and (row["conversion"] or 0) < .03:
+            row["pricing_action"] = "Do not cut price yet; first isolate whether traffic is relevant and the variation is visible."
+            row["ppc_action"] = "Do not add child-specific PPC until query relevance and variation placement are verified."
+            row["measurement_plan"] = "Reassess after 7 days; consider a price test only if qualified traffic remains high and CVR remains below 3%."
+        elif row["status"] == "Growth opportunity":
+            row["pricing_action"] = "Hold price; rising daily sales does not justify introducing a second variable."
+            row["ppc_action"] = "No separate campaign yet; this product was not the strongest controlled-test candidate."
+            row["measurement_plan"] = "Monitor 7-day sales pace, conversion and inventory while the single secondary-ASIN test runs."
+        else:
+            row["pricing_action"] = "Hold price; no product-level price intervention is supported."
+            row["ppc_action"] = "No child-specific PPC change. Keep learning concentrated in the hero and selected test ASIN."
+            row["measurement_plan"] = "Review weekly; intervene only after a material traffic, conversion or inventory exception."
+        row["evidence_limit"] = ("Amazon advertising charges are allocated to ASIN economics, but search-term history does not prove which child variation caused the order."
+                                 if row["ad_spend"] else
+                                 "No child-level PPC attribution is available; this recommendation uses product traffic, sales and inventory evidence.")
+
+    strategy = {
+        "hero": hero, "candidate": candidate, "proven_terms": proven_terms,
+        "headline": (f"Keep {hero['color']} {hero['size']} {hero['pack_type']} as the PPC hero"
+                     if hero else "No PPC hero resolved"),
+        "recommendation": (f"Run one controlled secondary-ASIN test on {candidate['color']} {candidate['size']} {candidate['pack_type']}; keep all other child PPC unchanged."
+                           if candidate else "Keep PPC concentrated in the current hero until another child has enough conversion and inventory evidence."),
+    }
 
     def rollup(field, label):
         grouped = {}
@@ -501,7 +563,7 @@ def product_portfolio(period_start, period_end, brand):
     }
     return {"coverage": coverage, "pack_groups": rollup("pack_type", "Pack family"),
             "color_groups": rollup("color", "Color"), "size_groups": rollup("size", "Size"),
-            "products": rows, "prior_period": prior_period}
+            "products": rows, "prior_period": prior_period, "strategy": strategy}
 
 
 def previous_period(period_start):

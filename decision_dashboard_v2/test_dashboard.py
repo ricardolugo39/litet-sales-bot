@@ -137,6 +137,26 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Complete Has10 portfolio", response.data)
         self.assertIn(b"Seller SKUs mapped", response.data)
 
+    def test_litet_product_actions_name_both_controllable_levers(self):
+        response = self.client.get(
+            "/products?brand=Litet&period=2026-08-01%7C2026-08-23"
+        )
+        self.assertIn(b"PPC portfolio strategy", response.data)
+        self.assertIn(b"Secondary test candidate", response.data)
+        self.assertIn(b"Black Large/X-Large", response.data)
+        self.assertIn(b"10\xe2\x80\x9315% of the hero budget", response.data)
+        for marker in (b"Pricing:", b"PPC:", b"Measure:", b"Limitation:"):
+            self.assertIn(marker, response.data)
+
+    def test_decisions_reuses_product_recommendations(self):
+        response = self.client.get(
+            "/decisions?brand=Litet&period=2026-08-01%7C2026-08-23"
+        )
+        self.assertEqual(response.status_code, 200)
+        for marker in (b"Coordinated cases", b"PPC hero", b"Secondary test",
+                       b"Evidence limitation"):
+            self.assertIn(marker, response.data)
+
     def test_has10_ppc_playbook_shows_campaign_location(self):
         response = self.client.get(
             "/ppc?brand=Has10&period=2026-08-01%7C2026-08-16"
@@ -198,7 +218,7 @@ class DashboardTest(unittest.TestCase):
         query = "?brand=Litet&period=2026-08-01%7C2026-08-16"
         for path, marker in (("/products", b"Parent competitive context"),
                              ("/ppc", b"PPC + organic"),
-                             ("/decisions", b"Open cases"),
+                             ("/decisions", b"Coordinated cases"),
                              ("/decisions/pricing", b"Contribution-preservation scenarios")):
             response = self.client.get(path + query)
             self.assertEqual(response.status_code, 200, path)

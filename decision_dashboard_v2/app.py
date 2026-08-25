@@ -195,7 +195,12 @@ def ppc():
 
 @app.get("/decisions")
 def decisions():
-    ctx=common("decisions"); actions,prior=action_queue(ctx["start"],ctx["end"],ctx["brand"]); ctx.update(actions=actions,prior_period=prior,interventions=recent_interventions())
+    ctx=common("decisions"); portfolio=product_portfolio(ctx["start"],ctx["end"],ctx["brand"])
+    cases=[row for row in portfolio["products"]
+           if row["is_ppc_hero"] or row["is_ppc_test_candidate"] or row["status"] in {"Act now","Watch"}]
+    cases.sort(key=lambda row: (0 if row["is_ppc_hero"] else 1 if row["is_ppc_test_candidate"] else 2,
+                                row["status_rank"], -(row["ordered_sales"] or 0)))
+    ctx.update(actions=cases[:6],portfolio=portfolio,prior_period=portfolio["prior_period"],interventions=recent_interventions())
     return render_template("dashboard.html",**ctx)
 
 @app.get("/decisions/pricing")
