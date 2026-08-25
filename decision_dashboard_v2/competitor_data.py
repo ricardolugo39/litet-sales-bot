@@ -4,6 +4,7 @@ Market estimates stay separate from Amazon actuals and never enter financial tot
 """
 CAPTURED_AT = "2026-08-18"
 HAS10_KEYWORDS_CAPTURED_AT = "2026-08-25"
+LITET_KEYWORDS_CAPTURED_AT = "2026-08-25"
 HAS10_KEYWORD_OPPORTUNITIES = [
  {"phrase":"youth cleat covers","search_volume":1200,"volume_trend_30d_pct":142,"suggested_bid_usd":0.55,"rank":11,"peer_rank":12.5,"competitors":4},
  {"phrase":"cleat covers football","search_volume":1011,"volume_trend_30d_pct":65,"suggested_bid_usd":0.48,"rank":12,"peer_rank":14.3,"competitors":4},
@@ -20,18 +21,18 @@ HAS10_KEYWORD_OPPORTUNITIES = [
  {"phrase":"spats football","search_volume":3292,"volume_trend_30d_pct":101,"suggested_bid_usd":0.68,"rank":45,"peer_rank":11.0,"competitors":4},
 ]
 LITET_PARENT_KEYWORD_OPPORTUNITIES = [
- {"phrase":"thin cycling socks","search_volume":327,"rank":17,"peer_rank":31.1,"competitors":10},
- {"phrase":"cycling socks white","search_volume":367,"rank":14,"peer_rank":41.9,"competitors":10},
- {"phrase":"aero socks cycling","search_volume":777,"rank":20,"peer_rank":33.8,"competitors":10},
- {"phrase":"cycling aero socks","search_volume":564,"rank":20,"peer_rank":33.6,"competitors":10},
- {"phrase":"aero cycling socks","search_volume":934,"rank":22,"peer_rank":38.5,"competitors":10},
- {"phrase":"road cycling socks","search_volume":659,"rank":25,"peer_rank":33.3,"competitors":10},
- {"phrase":"cycling socks for men","search_volume":3027,"rank":30,"peer_rank":42.1,"competitors":10},
- {"phrase":"cycling socks","search_volume":11742,"rank":32,"peer_rank":36.0,"competitors":10},
- {"phrase":"aero socks","search_volume":934,"rank":33,"peer_rank":39.6,"competitors":9},
- {"phrase":"black cycling socks","search_volume":280,"rank":31,"peer_rank":45.8,"competitors":10},
- {"phrase":"bicycling socks","search_volume":358,"rank":38,"peer_rank":31.4,"competitors":10},
- {"phrase":"summer cycling socks lightweight","search_volume":308,"rank":48,"peer_rank":27.7,"competitors":10},
+ {"phrase":"thin cycling socks","search_volume":386,"volume_trend_30d_pct":81,"suggested_bid_usd":None,"rank":23,"peer_rank":32.7,"competitors":9},
+ {"phrase":"cycling socks white","search_volume":254,"volume_trend_30d_pct":-25,"suggested_bid_usd":None,"rank":11,"peer_rank":54.7,"competitors":9},
+ {"phrase":"aero socks cycling","search_volume":757,"volume_trend_30d_pct":-15,"suggested_bid_usd":0.91,"rank":19,"peer_rank":38.0,"competitors":9},
+ {"phrase":"cycling aero socks","search_volume":611,"volume_trend_30d_pct":-19,"suggested_bid_usd":0.75,"rank":17,"peer_rank":37.1,"competitors":9},
+ {"phrase":"aero cycling socks","search_volume":913,"volume_trend_30d_pct":-38,"suggested_bid_usd":0.77,"rank":12,"peer_rank":41.1,"competitors":9},
+ {"phrase":"road cycling socks","search_volume":503,"volume_trend_30d_pct":1,"suggested_bid_usd":0.99,"rank":27,"peer_rank":44.7,"competitors":9},
+ {"phrase":"cycling socks for men","search_volume":3186,"volume_trend_30d_pct":-28,"suggested_bid_usd":1.30,"rank":52,"peer_rank":70.2,"competitors":9},
+ {"phrase":"cycling socks","search_volume":11481,"volume_trend_30d_pct":-23,"suggested_bid_usd":1.27,"rank":30,"peer_rank":41.6,"competitors":9},
+ {"phrase":"aero socks","search_volume":1011,"volume_trend_30d_pct":-47,"suggested_bid_usd":1.02,"rank":23,"peer_rank":33.4,"competitors":8},
+ {"phrase":"black cycling socks","search_volume":491,"volume_trend_30d_pct":-36,"suggested_bid_usd":None,"rank":21,"peer_rank":51.8,"competitors":9},
+ {"phrase":"bicycling socks","search_volume":437,"volume_trend_30d_pct":-14,"suggested_bid_usd":None,"rank":113,"peer_rank":31.3,"competitors":9},
+ {"phrase":"summer cycling socks lightweight","search_volume":244,"volume_trend_30d_pct":-46,"suggested_bid_usd":None,"rank":59,"peer_rank":34.2,"competitors":9},
 ]
 LITET_KEYWORD_HISTORY = [
  {"phrase":"cycling socks","jul_rank":16,"aug_rank":16,"jul_volume":13873,"aug_volume":11742,"aug_sponsored_rank":3},
