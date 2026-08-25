@@ -162,6 +162,16 @@ class DashboardTest(unittest.TestCase):
                 self.assertIn(b"Quick ranges",response.data)
                 self.assertIn(b"Monthly periods",response.data)
 
+    def test_ppc_all_brands_renders_without_missing_trend_fields(self):
+        response=self.client.get("/ppc?brand=All")
+        self.assertEqual(response.status_code,200)
+        self.assertIn(b"Select Litet or Has10",response.data)
+
+    def test_invalid_period_falls_back_to_default_period(self):
+        response=self.client.get("/ppc?brand=Litet&period=2026-08-01")
+        self.assertEqual(response.status_code,200)
+        self.assertIn(b"PPC + organic",response.data)
+
     def test_price_test_is_logged_but_not_executed(self):
         response = self.client.post("/decisions/pricing/approve", data={
             "brand":"Litet", "asin":"B0DSCFMCQD", "old_value":"14.99",

@@ -665,7 +665,11 @@ def keyword_playbook(period_start, period_end, brand):
 
 
 def ppc_organic_trend(brand):
-    if brand == "All": return {"months":[],"correlation":None}
+    if brand == "All":
+        return {"months":[],"correlation":None,"total_correlation":None,
+                "change_correlation":None,"lagged_correlation":None,
+                "sample_months":0,"analysis_start":None,"analysis_end":None,
+                "definition":"Select Litet or Has10 to calculate brand-level PPC and non-ad-unit relationships."}
     with connect() as conn:
         orders = conn.execute("""SELECT substr(o."purchase-date",1,7) month,SUM(CAST(o.quantity AS REAL)) total_units
           FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1

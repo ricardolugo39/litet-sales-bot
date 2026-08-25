@@ -147,12 +147,17 @@ def compact_money(value):
 def number(value): return "—" if value is None else f"{value:,.0f}"
 
 @app.template_filter("percent")
-def percent(value): return "—" if value is None else f"{value:.1%}"
+def percent(value):
+    try: return "—" if value is None else f"{float(value):.1%}"
+    except (TypeError, ValueError): return "—"
 
 def selection():
     choices=ppc_periods(); selected=request.args.get("period")
-    if selected: start,end=selected.split("|")
-    else:
+    selected_parts=selected.split("|") if selected else []
+    try:
+        start,end=selected_parts
+        if date.fromisoformat(start)>date.fromisoformat(end): raise ValueError
+    except (TypeError, ValueError):
         aligned=next((p for p in choices if p.get("group") == "Monthly periods" and p["has_economics"]),choices[0]); start,end=aligned["period_start"],aligned["period_end"]
     brand=request.args.get("brand","Litet")
     if brand not in {"All","Litet","Has10"}: brand="Litet"
