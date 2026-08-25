@@ -147,6 +147,10 @@ class DashboardTest(unittest.TestCase):
         playbook = keyword_playbook("2026-08-01", "2026-08-16", "Litet")
         campaigns = [row["campaign_name"].lower() for row in playbook["targets"]]
         self.assertEqual(campaigns, sorted(campaigns))
+        self.assertTrue(playbook["campaigns"])
+        self.assertTrue(any(c["open"] for c in playbook["campaigns"]))
+        self.assertEqual(sum(len(c["targets"]) for c in playbook["campaigns"]),
+                         len(playbook["targets"]))
 
     def test_all_v2_pages(self):
         query = "?brand=Litet&period=2026-08-01%7C2026-08-16"

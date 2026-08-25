@@ -611,6 +611,26 @@ def keyword_playbook(period_start, period_end, brand):
             target["decision"]="Monitor"; target["reason"]="No target-level bid change is supported yet."
         target_plan.append(target)
     target_plan.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["target"].lower()))
+    campaign_map={}
+    for target in target_plan:
+        campaign=campaign_map.setdefault(target["campaign_name"],{
+            "campaign_name":target["campaign_name"],"targets":[],"spend":0,
+            "orders":0,"ad_sales":0,"action_count":0})
+        campaign["targets"].append(target)
+        campaign["spend"]+=target["spend"] or 0
+        campaign["orders"]+=target["orders"] or 0
+        campaign["ad_sales"]+=target["ad_sales"] or 0
+        if target["decision"].startswith("Reduce"):
+            campaign["action_count"]+=1
+    campaign_groups=[]
+    for campaign in campaign_map.values():
+        campaign["acos"]=(campaign["spend"]/campaign["ad_sales"]
+                           if campaign["ad_sales"] else None)
+        campaign["open"]=campaign["action_count"]>0
+        campaign["recommendation"]=(f"{campaign['action_count']} bid change{'s' if campaign['action_count']!=1 else ''}"
+                                      if campaign["action_count"] else "No immediate bid changes")
+        campaign_groups.append(campaign)
+    campaign_groups.sort(key=lambda r:(not r["open"],-r["spend"],r["campaign_name"].lower()))
     focus=[]; reduce=[]; watch=[]
     for raw in rows:
         row=dict(raw)
@@ -656,7 +676,7 @@ def keyword_playbook(period_start, period_end, brand):
     objective=(f"Preserve the Has10 listing through the season while moving TaCoS toward {cost['break_even_tacos']:.0%} or lower."
                if brand=="Has10" else
                f"Protect Litet's proven traffic while moving TaCoS toward {cost['break_even_tacos']:.0%} or lower and checking organic rank before every material cut.")
-    return {"targets":target_plan,"focus":focus[:15],"reduce":reduce[:12],"watch":watch[:12],
+    return {"targets":target_plan,"campaigns":campaign_groups,"focus":focus[:15],"reduce":reduce[:12],"watch":watch[:12],
             "contribution_per_order":contribution_per_order,
             "allowable_ad_per_order":allowable_ad_per_order,
             "objective":objective,
