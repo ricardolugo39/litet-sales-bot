@@ -6,9 +6,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 if __package__:
-    from .competitor_data import CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
+    from .competitor_data import CAPTURED_AT, HAS10_KEYWORDS_CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
 else:  # Supports `python app.py` from this directory.
-    from competitor_data import CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
+    from competitor_data import CAPTURED_AT, HAS10_KEYWORDS_CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
 
 
 load_dotenv()
@@ -735,6 +735,7 @@ def keyword_opportunities(period_start, period_end, brand):
     output=[]
     for source_row in source:
         item=dict(source_row); evidence=by_phrase.get(item["phrase"],[])
+        item["metrics_captured_at"]=(HAS10_KEYWORDS_CAPTURED_AT if brand=="Has10" else CAPTURED_AT)
         item["clicks"]=sum(r["clicks"] or 0 for r in evidence)
         item["orders"]=sum(r["orders"] or 0 for r in evidence)
         item["spend"]=sum(r["spend"] or 0 for r in evidence)

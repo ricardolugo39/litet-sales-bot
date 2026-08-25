@@ -3,20 +3,21 @@
 Market estimates stay separate from Amazon actuals and never enter financial totals.
 """
 CAPTURED_AT = "2026-08-18"
+HAS10_KEYWORDS_CAPTURED_AT = "2026-08-25"
 HAS10_KEYWORD_OPPORTUNITIES = [
- {"phrase":"youth cleat covers","search_volume":934,"rank":11,"peer_rank":12.5,"competitors":4},
- {"phrase":"cleat covers football","search_volume":1034,"rank":12,"peer_rank":14.3,"competitors":4},
- {"phrase":"football cleat covers","search_volume":1037,"rank":13,"peer_rank":13.3,"competitors":4},
- {"phrase":"cleat spats","search_volume":931,"rank":13,"peer_rank":7.8,"competitors":4},
- {"phrase":"youth football spats","search_volume":628,"rank":13,"peer_rank":7.8,"competitors":4},
- {"phrase":"kids cleat covers football youth","search_volume":402,"rank":14,"peer_rank":11.0,"competitors":4},
- {"phrase":"spats football youth","search_volume":538,"rank":14,"peer_rank":8.5,"competitors":4},
- {"phrase":"cleat covers youth","search_volume":1320,"rank":15,"peer_rank":22.0,"competitors":4},
- {"phrase":"youth football spats for cleats","search_volume":556,"rank":15,"peer_rank":10.5,"competitors":4},
- {"phrase":"football spats for cleats","search_volume":829,"rank":17,"peer_rank":4.0,"competitors":4},
- {"phrase":"football cleat covers youth","search_volume":705,"rank":17,"peer_rank":19.5,"competitors":4},
- {"phrase":"football spats","search_volume":2294,"rank":34,"peer_rank":6.3,"competitors":4},
- {"phrase":"spats football","search_volume":3307,"rank":45,"peer_rank":11.0,"competitors":4},
+ {"phrase":"youth cleat covers","search_volume":1200,"volume_trend_30d_pct":142,"suggested_bid_usd":0.55,"rank":11,"peer_rank":12.5,"competitors":4},
+ {"phrase":"cleat covers football","search_volume":1011,"volume_trend_30d_pct":65,"suggested_bid_usd":0.48,"rank":12,"peer_rank":14.3,"competitors":4},
+ {"phrase":"football cleat covers","search_volume":1290,"volume_trend_30d_pct":89,"suggested_bid_usd":0.53,"rank":13,"peer_rank":13.3,"competitors":4},
+ {"phrase":"cleat spats","search_volume":1011,"volume_trend_30d_pct":40,"suggested_bid_usd":0.41,"rank":13,"peer_rank":7.8,"competitors":4},
+ {"phrase":"youth football spats","search_volume":657,"volume_trend_30d_pct":326,"suggested_bid_usd":0.66,"rank":13,"peer_rank":7.8,"competitors":4},
+ {"phrase":"kids cleat covers football youth","search_volume":402,"volume_trend_30d_pct":50,"suggested_bid_usd":None,"rank":14,"peer_rank":11.0,"competitors":4},
+ {"phrase":"spats football youth","search_volume":431,"volume_trend_30d_pct":712,"suggested_bid_usd":0.51,"rank":14,"peer_rank":8.5,"competitors":4},
+ {"phrase":"cleat covers youth","search_volume":1949,"volume_trend_30d_pct":82,"suggested_bid_usd":0.59,"rank":15,"peer_rank":22.0,"competitors":4},
+ {"phrase":"youth football spats for cleats","search_volume":564,"volume_trend_30d_pct":304,"suggested_bid_usd":0.62,"rank":15,"peer_rank":10.5,"competitors":4},
+ {"phrase":"football spats for cleats","search_volume":1097,"volume_trend_30d_pct":33,"suggested_bid_usd":0.47,"rank":17,"peer_rank":4.0,"competitors":4},
+ {"phrase":"football cleat covers youth","search_volume":810,"volume_trend_30d_pct":345,"suggested_bid_usd":0.46,"rank":17,"peer_rank":19.5,"competitors":4},
+ {"phrase":"football spats","search_volume":2605,"volume_trend_30d_pct":92,"suggested_bid_usd":0.53,"rank":34,"peer_rank":6.3,"competitors":4},
+ {"phrase":"spats football","search_volume":3292,"volume_trend_30d_pct":101,"suggested_bid_usd":0.68,"rank":45,"peer_rank":11.0,"competitors":4},
 ]
 LITET_PARENT_KEYWORD_OPPORTUNITIES = [
  {"phrase":"thin cycling socks","search_volume":327,"rank":17,"peer_rank":31.1,"competitors":10},
