@@ -381,9 +381,13 @@ def product_diagnostics(period_start, period_end, brand):
               FROM inventory_snapshots
               WHERE snapshot_date=(SELECT MAX(snapshot_date) FROM inventory_snapshots)
               GROUP BY asin
+            ), sku_map AS (
+              SELECT product_key, GROUP_CONCAT(DISTINCT sku) skus, COUNT(DISTINCT sku) sku_count
+              FROM bridge_product_sku WHERE is_current=1 GROUP BY product_key
             )
             SELECT p.asin, p.canonical_brand brand, p.canonical_product_name product,
-                   p.color, p.size, p.pack_type,
+                   p.color, p.size, p.pack_type, p.product_family,
+                   COALESCE(s.skus,'') skus, COALESCE(s.sku_count,0) sku_count,
                    COALESCE(t.sessions,0) sessions, COALESCE(t.units,0) units,
                    COALESCE(t.ordered_sales,0) ordered_sales, t.buy_box,
                    CASE WHEN t.sessions>0 THEN 1.0*t.units/t.sessions END conversion,
@@ -394,8 +398,8 @@ def product_diagnostics(period_start, period_end, brand):
             LEFT JOIN traffic t ON t.asin=p.asin
             LEFT JOIN econ e ON e.asin=p.asin
             LEFT JOIN inv ON inv.asin=p.asin
+            LEFT JOIN sku_map s ON s.product_key=p.product_key
             WHERE p.is_current=1 AND {where}
-              AND (COALESCE(t.sessions,0)>0 OR COALESCE(e.net_sales,0)<>0 OR COALESCE(inv.inventory,0)>0)
             ORDER BY t.units DESC, t.sessions DESC
             """,
             [period_start, period_end, period_start, period_end, *params],
@@ -415,6 +419,89 @@ def product_diagnostics(period_start, period_end, brand):
         else:
             row["diagnosis"] = "Healthy / monitor"
     return data
+
+
+def product_portfolio(period_start, period_end, brand):
+    """Analyze the complete current catalog, including products with no activity."""
+    from datetime import date
+
+    rows = product_diagnostics(period_start, period_end, brand)
+    prior_period = previous_period(period_start)
+    old_rows = (product_diagnostics(prior_period["period_start"], prior_period["period_end"], brand)
+                if prior_period else [])
+    old_by_asin = {row["asin"]: row for row in old_rows}
+    days = (date.fromisoformat(period_end) - date.fromisoformat(period_start)).days + 1
+    old_days = ((date.fromisoformat(prior_period["period_end"])
+                 - date.fromisoformat(prior_period["period_start"])).days + 1
+                if prior_period else 1)
+
+    status_order = {"Act now": 0, "Watch": 1, "Growth opportunity": 2,
+                    "Insufficient evidence": 3, "Healthy—no action": 4}
+    for row in rows:
+        old = old_by_asin.get(row["asin"], {})
+        sales_rate = (row["ordered_sales"] or 0) / days
+        old_sales_rate = (old.get("ordered_sales") or 0) / old_days
+        traffic_rate = (row["sessions"] or 0) / days
+        old_traffic_rate = (old.get("sessions") or 0) / old_days
+        row["sales_pace_change"] = sales_rate / old_sales_rate - 1 if old_sales_rate else None
+        row["traffic_pace_change"] = traffic_rate / old_traffic_rate - 1 if old_traffic_rate else None
+        daily_units = (row["units"] or 0) / days
+        row["days_cover"] = row["inventory"] / daily_units if daily_units else None
+        row["sku_list"] = [sku for sku in (row.get("skus") or "").split(",") if sku]
+
+        if row["inventory"] <= 0 and row["units"] > 0:
+            status, reason = "Act now", "Sales occurred but no FBA inventory is currently available."
+        elif row["inventory"] > 0 and row["sessions"] == 0:
+            status, reason = "Act now", "Available inventory recorded no traffic in the selected period."
+        elif row["sessions"] >= 20 and row["units"] == 0:
+            status, reason = "Act now", "Material traffic produced no orders; inspect the offer and variation placement."
+        elif row["net_proceeds"] < 0 and row["ad_spend"] > 0:
+            status, reason = "Act now", "Advertising charges coincide with negative Amazon proceeds before COGS."
+        elif row["sessions"] < 10 and row["units"] < 2:
+            status, reason = "Insufficient evidence", "Too little selected-period demand to support a product change."
+        elif row["diagnosis"] == "Conversion weakness" or (row["sales_pace_change"] is not None and row["sales_pace_change"] < -.15):
+            status, reason = "Watch", "Demand pace or conversion is weak enough to require diagnosis before intervention."
+        elif row["sales_pace_change"] is not None and row["sales_pace_change"] > .10:
+            status, reason = "Growth opportunity", "Daily sales pace is up; validate inventory and scalable traffic."
+        else:
+            status, reason = "Healthy—no action", "No material product-level exception is supported by current evidence."
+        row.update(status=status, status_rank=status_order[status], status_reason=reason)
+
+    def rollup(field, label):
+        grouped = {}
+        for row in rows:
+            name = row.get(field) or "Unspecified"
+            group = grouped.setdefault(name, {"name": name, "label": label, "rows": [],
+                "sessions": 0, "units": 0, "sales": 0, "inventory": 0, "net_proceeds": 0,
+                "sku_count": 0, "asins": 0})
+            group["rows"].append(row)
+            group["asins"] += 1
+            group["sku_count"] += row["sku_count"]
+            for source, target in (("sessions","sessions"),("units","units"),
+                                   ("ordered_sales","sales"),("inventory","inventory"),
+                                   ("net_proceeds","net_proceeds")):
+                group[target] += row[source] or 0
+        for group in grouped.values():
+            group["conversion"] = group["units"] / group["sessions"] if group["sessions"] else None
+            group["rows"].sort(key=lambda row: (row["status_rank"], -(row["ordered_sales"] or 0)))
+            group["status"] = group["rows"][0]["status"]
+            group["open"] = group["status"] in {"Act now", "Watch"}
+            group["status_counts"] = {status: sum(r["status"] == status for r in group["rows"])
+                                      for status in status_order}
+        return sorted(grouped.values(), key=lambda g: (status_order[g["status"]], -g["sales"]))
+
+    rows.sort(key=lambda row: (row["status_rank"], -(row["ordered_sales"] or 0)))
+    coverage = {
+        "asins": len(rows), "skus": sum(row["sku_count"] for row in rows),
+        "packs": len({row["pack_type"] for row in rows}),
+        "colors": len({row["color"] for row in rows if row["color"]}),
+        "sizes": len({row["size"] for row in rows if row["size"]}),
+        "status_counts": {status: sum(row["status"] == status for row in rows)
+                          for status in status_order},
+    }
+    return {"coverage": coverage, "pack_groups": rollup("pack_type", "Pack family"),
+            "color_groups": rollup("color", "Color"), "size_groups": rollup("size", "Size"),
+            "products": rows, "prior_period": prior_period}
 
 
 def previous_period(period_start):

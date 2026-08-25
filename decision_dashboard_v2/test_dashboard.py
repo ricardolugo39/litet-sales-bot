@@ -112,6 +112,31 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Physical pairs", response.data)
         self.assertIn(b"a 3-pack or 6-pack counts as one", response.data)
 
+    def test_litet_product_portfolio_covers_every_pack_and_sku_layer(self):
+        response = self.client.get(
+            "/products?brand=Litet&period=2026-08-01%7C2026-08-23"
+        )
+        self.assertEqual(response.status_code, 200)
+        for marker in (b"Complete Litet portfolio", b"Pack-family decisions",
+                       b"3-pack", b"6-pack", b"single", b"By color", b"By size",
+                       b"All ASIN and SKU evidence", b"Healthy\xe2\x80\x94no action"):
+            self.assertIn(marker, response.data)
+
+    def test_has10_product_portfolio_uses_same_complete_framework(self):
+        from decision_dashboard_v2.analytics import product_portfolio
+        portfolio = product_portfolio("2026-08-01", "2026-08-23", "Has10")
+        self.assertEqual(portfolio["coverage"]["asins"],
+                         sum(group["asins"] for group in portfolio["pack_groups"]))
+        self.assertGreater(portfolio["coverage"]["skus"], portfolio["coverage"]["asins"])
+        self.assertEqual(sum(portfolio["coverage"]["status_counts"].values()),
+                         portfolio["coverage"]["asins"])
+        response = self.client.get(
+            "/products?brand=Has10&period=2026-08-01%7C2026-08-23"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Complete Has10 portfolio", response.data)
+        self.assertIn(b"Seller SKUs mapped", response.data)
+
     def test_has10_ppc_playbook_shows_campaign_location(self):
         response = self.client.get(
             "/ppc?brand=Has10&period=2026-08-01%7C2026-08-16"

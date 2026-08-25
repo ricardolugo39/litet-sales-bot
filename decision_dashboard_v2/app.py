@@ -11,12 +11,12 @@ from flask import Flask, after_this_request, redirect, render_template, request,
 if __package__:
     from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                             market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                            ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics)
+                            ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
     from .interventions import recent_interventions, record_pricing_case
 else:  # Supports `python app.py` from this directory.
     from analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                            market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                           ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics)
+                           ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
     from interventions import recent_interventions, record_pricing_case
 
 app = Flask(__name__)
@@ -182,7 +182,9 @@ def executive():
 @app.get("/products")
 def products():
     ctx=common("products"); start,end,brand=ctx["start"],ctx["end"],ctx["brand"]
-    ctx.update(families=family_diagnostics(start,end,brand),products=product_diagnostics(start,end,brand),market=market_context(brand),seasonality=seasonality_matrix(brand))
+    portfolio=product_portfolio(start,end,brand)
+    ctx.update(families=family_diagnostics(start,end,brand),portfolio=portfolio,
+               products=portfolio["products"],market=market_context(brand),seasonality=seasonality_matrix(brand))
     return render_template("dashboard.html",**ctx)
 
 @app.get("/ppc")
