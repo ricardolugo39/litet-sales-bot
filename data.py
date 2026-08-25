@@ -36,6 +36,26 @@ def load_transactions() -> pd.DataFrame:
     return load_table("transactions")
 
 
+def load_cogs_ledger() -> pd.DataFrame:
+    return load_table("cogs_ledger")
+
+
+def load_sales_profitability() -> pd.DataFrame:
+    return load_table("sales_profitability")
+
+
+def load_ppc_campaign_metrics() -> pd.DataFrame:
+    return load_table("ppc_campaign_metrics")
+
+
+def load_ppc_negative_keyword_candidates() -> pd.DataFrame:
+    return load_table("ppc_negative_keyword_candidates")
+
+
+def load_ppc_profit_after_ads() -> pd.DataFrame:
+    return load_table("ppc_profit_after_ads")
+
+
 def load_inventory_snapshots() -> pd.DataFrame:
     return load_table("inventory_snapshots")
 

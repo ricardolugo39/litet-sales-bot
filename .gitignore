@@ -5,5 +5,13 @@ __pycache__/
 *.db
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
+
+# Uploaded Seller Central reports and offline database caches
+uploads/
+offline_cache/
+decision_dashboard_v2/data/
 
 .ipynb_checkpoints/
+.cache/

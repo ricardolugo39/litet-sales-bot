@@ -22,6 +22,8 @@ executing==2.2.1
 fastapi==0.135.3
 filelock==3.25.2
 fonttools==4.63.0
+Flask==3.1.2
+gunicorn==23.0.0
 fsspec==2026.3.0
 gitdb==4.0.12
 GitPython==3.1.47
@@ -55,6 +57,7 @@ narwhals==2.20.0
 nest-asyncio==1.6.0
 numpy==2.4.4
 openai==2.31.0
+openpyxl==3.1.5
 orjson==3.11.8
 packaging==26.0
 pandas==3.0.2

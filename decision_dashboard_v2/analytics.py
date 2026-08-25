@@ -1,0 +1,1031 @@
+import os
+import sqlite3
+from statistics import median
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+try:
+    from .competitor_data import CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
+except ImportError:  # Supports `python app.py` from this directory.
+    from competitor_data import CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
+
+
+load_dotenv()
+
+
+def database_path():
+    """Resolve at connection time so tests and offline fallback can switch DBs."""
+    return os.getenv(
+        "LITET_DB_PATH",
+        str(Path(__file__).with_name("data") / "litet.db"),
+    )
+
+
+def connect():
+    conn = sqlite3.connect(database_path())
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def periods():
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT t.period_start, t.period_end, t.period_type,
+                   CASE WHEN e.period_start IS NULL THEN 0 ELSE 1 END AS has_economics
+            FROM (SELECT DISTINCT period_start, period_end, period_type FROM business_traffic) t
+            LEFT JOIN (SELECT DISTINCT period_start, period_end FROM asin_economics) e
+              USING (period_start, period_end)
+            ORDER BY t.period_start DESC, t.period_end DESC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def ppc_periods():
+    """PPC date presets; daily PPC facts support ranges beyond imported report periods."""
+    import calendar
+    from datetime import date
+    base = periods()
+    if not base:
+        return []
+    latest = date.fromisoformat(max(row["period_end"] for row in base))
+    quarter_month = ((latest.month - 1) // 3) * 3 + 1
+    current_start = latest.replace(day=1).isoformat()
+    presets = [
+        {"period_start": latest.replace(month=quarter_month, day=1).isoformat(),
+         "period_end": latest.isoformat(), "period_type": "qtd", "has_economics": 1,
+         "label": f"QTD · Q{((latest.month - 1)//3)+1} {latest.year}", "group":"Quick ranges"},
+        {"period_start": latest.replace(month=1, day=1).isoformat(),
+         "period_end": latest.isoformat(), "period_type": "ytd", "has_economics": 1,
+         "label": f"YTD · {latest.year}", "group":"Quick ranges"},
+    ]
+    choices=[]
+    for row in base:
+        item=dict(row)
+        start=date.fromisoformat(item["period_start"]); end=date.fromisoformat(item["period_end"])
+        # Uploaded weekly/custom slices from the current month are one reporting
+        # period in the UI. Keeping every slice created duplicate-looking filters
+        # and made the latest selection exclude earlier days in the same month.
+        if start.year == latest.year and start.month == latest.month:
+            continue
+        item["label"]=(f"{calendar.month_name[start.month]} {start.year}"
+                       + (f" MTD · through {end.day}" if end.day < calendar.monthrange(end.year,end.month)[1] else ""))
+        item["group"]="Monthly periods"
+        choices.append(item)
+    choices.insert(0, {
+        "period_start": current_start, "period_end": latest.isoformat(),
+        "period_type": "mtd", "has_economics": 1,
+        "label": f"{calendar.month_name[latest.month]} {latest.year} MTD · through {latest.day}",
+        "group": "Monthly periods",
+    })
+    seen={(r["period_start"],r["period_end"]) for r in choices}
+    return [p for p in presets if (p["period_start"],p["period_end"]) not in seen] + choices
+
+
+def _brand_clause(alias, brand):
+    if brand == "All":
+        return "1=1", []
+    return f"{alias}.canonical_brand = ?", [brand]
+
+
+def overview(period_start, period_end, brand):
+    where, params = _brand_clause("p", brand)
+    with connect() as conn:
+        traffic = conn.execute(
+            f"""
+            WITH period_asin_traffic AS (
+              SELECT period_start, period_end, child_asin AS asin,
+                     MAX(sessions_total) AS sessions,
+                     MAX(page_views_total) AS page_views,
+                     SUM(units_ordered) AS units,
+                     SUM(ordered_product_sales) AS ordered_sales,
+                     MAX(featured_offer_percentage) AS buy_box
+              FROM business_traffic
+              WHERE period_start>=? AND period_end<=?
+              GROUP BY period_start, period_end, child_asin
+            ), asin_traffic AS (
+              SELECT asin, SUM(sessions) sessions, SUM(page_views) page_views,
+                     SUM(units) units, SUM(ordered_sales) ordered_sales, AVG(buy_box) buy_box
+              FROM period_asin_traffic GROUP BY asin
+            )
+            SELECT COALESCE(SUM(a.sessions),0) sessions,
+                   COALESCE(SUM(a.page_views),0) page_views,
+                   COALESCE(SUM(a.units),0) units,
+                   COALESCE(SUM(a.ordered_sales),0) ordered_sales,
+                   CASE WHEN SUM(a.sessions)>0 THEN 1.0*SUM(a.units)/SUM(a.sessions) END conversion,
+                   AVG(a.buy_box) buy_box
+            FROM asin_traffic a JOIN dim_product p ON p.asin=a.asin
+            WHERE {where}
+            """,
+            [period_start, period_end, *params],
+        ).fetchone()
+        economics = conn.execute(
+            f"""
+            SELECT COALESCE(SUM(e.units_sold),0) units_sold,
+                   COALESCE(SUM(e.units_returned),0) returns,
+                   COALESCE(SUM(e.net_sales),0) net_sales,
+                   COALESCE(SUM(e.sponsored_products_charge),0) ad_spend,
+                   COALESCE(SUM(e.net_proceeds),0) net_proceeds,
+                   COALESCE(SUM(e.fba_fulfillment_fees),0) fulfillment_fees,
+                   COALESCE(SUM(e.referral_fee + e.referral_fee_refunds),0) referral_net,
+                   COALESCE(SUM(e.net_units_sold * COALESCE((
+                     SELECT c.unit_cogs FROM cogs_ledger c
+                     WHERE c.asin=e.asin AND c.effective_start<=e.period_end
+                       AND (c.effective_end IS NULL OR c.effective_end>=e.period_start)
+                     ORDER BY c.effective_start DESC LIMIT 1
+                   ),0)),0) estimated_cogs,
+                   CASE WHEN SUM(e.units_sold)>0 THEN 1.0*SUM(e.units_returned)/SUM(e.units_sold) END return_rate
+            FROM asin_economics e JOIN dim_product p ON p.asin=e.asin
+            WHERE e.period_start>=? AND e.period_end<=? AND {where}
+            """,
+            [period_start, period_end, *params],
+        ).fetchone()
+    result = {**dict(traffic), **dict(economics)}
+    result["tacos"] = result["ad_spend"] / result["ordered_sales"] if result["ordered_sales"] else None
+    result["contribution_after_cogs"] = result["net_proceeds"] - result["estimated_cogs"]
+    result["contribution_margin"] = result["contribution_after_cogs"] / result["net_sales"] if result["net_sales"] else None
+    result["amazon_costs_ex_ads"] = result["net_sales"] - result["net_proceeds"] - result["ad_spend"]
+    diagnostics = product_diagnostics(period_start, period_end, brand)
+    result["inventory_at_risk"] = sum(
+        row["inventory"] for row in diagnostics
+        if row["inventory"] > 0 and (row["sessions"] == 0 or row["diagnosis"] == "Conversion weakness")
+    )
+    return result
+
+
+def pnl_statement(period_start, period_end, brand):
+    metrics = overview(period_start, period_end, brand)
+    gross_sales = metrics["net_sales"]
+    result = {
+        "gross_sales": gross_sales,
+        "amazon_costs_ex_ads": metrics["amazon_costs_ex_ads"],
+        "ad_spend": metrics["ad_spend"],
+        "net_proceeds": metrics["net_proceeds"],
+        "cogs": metrics["estimated_cogs"],
+        "contribution": metrics["contribution_after_cogs"],
+        "margin": metrics["contribution_margin"],
+    }
+    for key in ("gross_sales", "amazon_costs_ex_ads", "ad_spend", "net_proceeds", "cogs", "contribution"):
+        result[f"{key}_pct"] = result[key] / gross_sales if gross_sales else None
+    return result
+
+
+def cost_diagnosis(period_start, period_end, brand):
+    where, params = _brand_clause("p", brand)
+    with connect() as conn:
+        row = conn.execute(
+            f"""SELECT COALESCE(SUM(e.net_sales),0) net_sales,
+                       COALESCE(SUM(e.fba_fulfillment_fees),0) fulfillment,
+                       COALESCE(SUM(e.referral_fee + e.referral_fee_refunds),0) referral,
+                       COALESCE(SUM(e.refund_administration_fee),0) refund_admin,
+                       COALESCE(SUM(e.other_fee_total),0) other,
+                       COALESCE(SUM(e.sponsored_products_charge),0) ads,
+                       COALESCE(SUM(e.net_units_sold),0) net_units,
+                       COALESCE(SUM(e.net_units_sold * COALESCE((
+                         SELECT c.unit_cogs FROM cogs_ledger c
+                         WHERE c.asin=e.asin AND c.effective_start<=e.period_end
+                           AND (c.effective_end IS NULL OR c.effective_end>=e.period_start)
+                         ORDER BY c.effective_start DESC LIMIT 1
+                       ),0)),0) cogs
+                FROM asin_economics e JOIN dim_product p ON p.asin=e.asin
+                WHERE e.period_start>=? AND e.period_end<=? AND {where}""",
+            [period_start, period_end, *params],
+        ).fetchone()
+        traffic_where, traffic_params = _brand_clause("tp", brand)
+        ordered = conn.execute(
+            f"""WITH asin_sales AS (
+                  SELECT child_asin asin, SUM(ordered_product_sales) ordered_sales
+                  FROM business_traffic WHERE period_start>=? AND period_end<=? GROUP BY child_asin
+                )
+                SELECT COALESCE(SUM(a.ordered_sales),0) ordered_sales
+                FROM asin_sales a JOIN dim_product tp ON tp.asin=a.asin
+                WHERE {traffic_where}""",
+            [period_start, period_end, *traffic_params],
+        ).fetchone()["ordered_sales"]
+    data=dict(row); sales=data["net_sales"]; data["ordered_sales"]=ordered
+    data["amazon_ex_ads"]=data["fulfillment"]+data["referral"]+data["refund_admin"]+data["other"]
+    data["pre_ad_contribution"]=sales-data["amazon_ex_ads"]-data["cogs"]
+    data["break_even_ad_spend"]=max(data["pre_ad_contribution"],0)
+    data["break_even_tacos"]=data["break_even_ad_spend"]/ordered if ordered else None
+    data["ad_reduction_to_break_even"]=max(data["ads"]-data["break_even_ad_spend"],0)
+    data["ad_reduction_pct"]=data["ad_reduction_to_break_even"]/data["ads"] if data["ads"] else None
+    data["ten_pct_margin_ad_spend"]=max(data["pre_ad_contribution"]-sales*.10,0)
+    for key in ("fulfillment","referral","refund_admin","other","amazon_ex_ads","cogs","pre_ad_contribution"):
+        data[f"{key}_pct"]=data[key]/sales if sales else None
+    data["fulfillment_per_unit"]=data["fulfillment"]/data["net_units"] if data["net_units"] else None
+    data["other_label"]="Inbound placement and other Amazon fees"
+    return data
+
+
+def advertising_detail(period_start, period_end, brand):
+    where = "1=1" if brand == "All" else "brand=?"
+    params = [] if brand == "All" else [brand]
+    with connect() as conn:
+        rows = conn.execute(
+            f"""SELECT campaign_name, SUM(impressions) impressions, SUM(clicks) clicks,
+                       SUM(spend) spend, SUM(ad_sales) ad_sales, SUM(ad_orders) ad_orders,
+                       CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos,
+                       CASE WHEN SUM(clicks)>0 THEN SUM(spend)/SUM(clicks) END cpc,
+                       CASE WHEN SUM(clicks)>0 THEN SUM(ad_orders)/SUM(clicks) END cvr
+                FROM ppc_fact_clean
+                WHERE report_date BETWEEN ? AND ? AND {where}
+                GROUP BY campaign_name ORDER BY spend DESC LIMIT 8""",
+            [period_start, period_end, *params],
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def brand_split(period_start, period_end):
+    output = []
+    for brand in ("Litet", "Has10"):
+        output.append({"brand": brand, **overview(period_start, period_end, brand)})
+    return output
+
+
+def monthly_trend(brand):
+    where, params = _brand_clause("p", brand)
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            WITH latest AS (
+              SELECT MAX(period_end) max_date FROM business_traffic
+            ), asin_traffic AS (
+              SELECT substr(period_start,1,7) month, child_asin AS asin,
+                     MAX(sessions_total) sessions,
+                     SUM(units_ordered) units,
+                     SUM(ordered_product_sales) ordered_sales
+              FROM business_traffic, latest
+              WHERE period_type='monthly' OR substr(period_start,1,7)=substr(max_date,1,7)
+              GROUP BY substr(period_start,1,7), period_start, period_end, child_asin
+            ), traffic_month AS (
+              SELECT month, asin, SUM(sessions) sessions, SUM(units) units,
+                     SUM(ordered_sales) ordered_sales
+              FROM asin_traffic GROUP BY month, asin
+            ), econ AS (
+              SELECT substr(e.period_start,1,7) month, SUM(e.sponsored_products_charge) ad_spend
+              FROM asin_economics e JOIN dim_product ep ON ep.asin=e.asin
+              WHERE {where.replace('p.', 'ep.')} AND
+                    (e.period_type='monthly' OR substr(e.period_start,1,7)=(SELECT substr(MAX(period_end),1,7) FROM business_traffic))
+              GROUP BY substr(e.period_start,1,7)
+            )
+            SELECT a.month || '-01' period_start,
+                   CASE WHEN a.month=(SELECT substr(max_date,1,7) FROM latest)
+                        THEN (SELECT max_date FROM latest)
+                        ELSE date(a.month || '-01','+1 month','-1 day') END period_end,
+                   CASE WHEN a.month=(SELECT substr(max_date,1,7) FROM latest) THEN 'mtd' ELSE 'monthly' END period_type,
+                   SUM(a.sessions) sessions, SUM(a.units) units,
+                   SUM(a.ordered_sales) ordered_sales,
+                   CASE WHEN SUM(a.sessions)>0 THEN 1.0*SUM(a.units)/SUM(a.sessions) END conversion,
+                   MAX(COALESCE(e.ad_spend,0)) ad_spend,
+                   CASE WHEN SUM(a.ordered_sales)>0 THEN MAX(COALESCE(e.ad_spend,0))/SUM(a.ordered_sales) END tacos
+            FROM traffic_month a JOIN dim_product p ON p.asin=a.asin
+            LEFT JOIN econ e ON e.month=a.month
+            WHERE {where}
+            GROUP BY a.month ORDER BY a.month
+            """,
+            [*params, *params],
+        ).fetchall()
+    result=[dict(row) for row in rows]
+    for row in result:
+        row["is_partial"]=row["period_type"] != "monthly"
+    return result
+
+
+def seasonality_matrix(brand, asin=None):
+    import calendar
+    where, params = _brand_clause("p", brand)
+    asin_filter="AND o.asin=?" if asin else ""
+    asin_params=[asin] if asin else []
+    with connect() as conn:
+        rows=conn.execute(f"""SELECT substr(o."purchase-date",1,4) year,
+                  substr(o."purchase-date",6,2) month,
+                  SUM(CAST(o.quantity AS REAL)) units,
+                  SUM(CAST(o.quantity AS REAL) * COALESCE(p.units_per_sellable_unit,1)) physical_units
+          FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
+          WHERE {where} {asin_filter} AND o."order-status" NOT IN ('Cancelled','Pending')
+          GROUP BY 1,2 ORDER BY 1,2""",[*params,*asin_params]).fetchall()
+        latest=conn.execute(f"""SELECT MAX(substr(o."purchase-date",1,10)) latest_date
+          FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
+          WHERE {where} {asin_filter} AND o."order-status" NOT IN ('Cancelled','Pending')""",
+          [*params,*asin_params]).fetchone()["latest_date"]
+    years=sorted({r["year"] for r in rows})[-3:]
+    lookup={(r["year"],int(r["month"])):r["units"] or 0 for r in rows}
+    physical_lookup={(r["year"],int(r["month"])):r["physical_units"] or 0 for r in rows}
+    latest_year=latest[:4] if latest else None; latest_month=int(latest[5:7]) if latest else None; latest_day=int(latest[8:10]) if latest else None
+    matrix=[]
+    for month in range(1,13):
+        values={year:lookup.get((year,month)) for year in years}
+        physical_values={year:physical_lookup.get((year,month)) for year in years}
+        current=values.get(latest_year) if latest_year in values else None
+        physical_current=physical_values.get(latest_year) if latest_year in physical_values else None
+        is_mtd=bool(latest and month==latest_month and latest_year in years)
+        projection=(current/latest_day*calendar.monthrange(int(latest_year),month)[1]
+                    if is_mtd and current is not None and latest_day else None)
+        physical_projection=(physical_current/latest_day*calendar.monthrange(int(latest_year),month)[1]
+                    if is_mtd and physical_current is not None and latest_day else None)
+        matrix.append({"month":month,"month_name":calendar.month_abbr[month],"values":values,
+                       "physical_values":physical_values,"is_mtd":is_mtd,"projection":projection,
+                       "physical_projection":physical_projection})
+    complete_years=[y for y in years if y!=latest_year]
+    prior_year=complete_years[-1] if complete_years else None
+    peak=[]
+    if prior_year:
+        ranked=sorted(((lookup.get((prior_year,m),0),m) for m in range(1,13)),reverse=True)[:3]
+        peak=[calendar.month_abbr[m] for units,m in ranked if units>0]
+    history_start=min((r["year"] for r in rows),default=None)
+    return {"years":years,"rows":matrix,"latest_date":latest,"latest_year":latest_year,
+            "prior_year":prior_year,"peak_months":peak,"history_start":history_start,
+            "show_physical_pairs":brand == "Litet",
+            "maturity":"Established" if history_start and latest_year and int(latest_year)-int(history_start)>=2 else "Emerging"}
+
+
+def ppc_coverage(period_start, period_end, brand):
+    where = "1=1" if brand == "All" else "brand=?"
+    params = [] if brand == "All" else [brand]
+    with connect() as conn:
+        row = conn.execute(
+            f"""SELECT COUNT(DISTINCT report_date) loaded_days, MIN(report_date) first_date,
+                       MAX(report_date) last_date, COALESCE(SUM(spend),0) detailed_spend
+                FROM ppc_fact_clean WHERE report_date BETWEEN ? AND ? AND {where}""",
+            [period_start, period_end, *params],
+        ).fetchone()
+    from datetime import date
+    result = dict(row)
+    result["expected_days"] = (date.fromisoformat(period_end)-date.fromisoformat(period_start)).days+1
+    result["complete"] = result["loaded_days"] == result["expected_days"]
+    return result
+
+
+def product_diagnostics(period_start, period_end, brand):
+    where, params = _brand_clause("p", brand)
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            WITH period_traffic AS (
+              SELECT period_start,period_end,child_asin asin, MAX(sessions_total) sessions,
+                     SUM(units_ordered) units, SUM(ordered_product_sales) ordered_sales,
+                     MAX(featured_offer_percentage) buy_box
+              FROM business_traffic WHERE period_start>=? AND period_end<=?
+              GROUP BY period_start,period_end,child_asin
+            ), traffic AS (
+              SELECT asin,SUM(sessions) sessions,SUM(units) units,SUM(ordered_sales) ordered_sales,AVG(buy_box) buy_box
+              FROM period_traffic GROUP BY asin
+            ), econ AS (
+              SELECT asin,SUM(net_sales) net_sales,SUM(net_proceeds) net_proceeds,
+                     SUM(sponsored_products_charge) sponsored_products_charge,SUM(units_returned) units_returned
+              FROM asin_economics WHERE period_start>=? AND period_end<=? GROUP BY asin
+            ), inv AS (
+              SELECT asin, SUM(CAST("Quantity Available" AS REAL)) inventory
+              FROM inventory_snapshots
+              WHERE snapshot_date=(SELECT MAX(snapshot_date) FROM inventory_snapshots)
+              GROUP BY asin
+            )
+            SELECT p.asin, p.canonical_brand brand, p.canonical_product_name product,
+                   p.color, p.size, p.pack_type,
+                   COALESCE(t.sessions,0) sessions, COALESCE(t.units,0) units,
+                   COALESCE(t.ordered_sales,0) ordered_sales, t.buy_box,
+                   CASE WHEN t.sessions>0 THEN 1.0*t.units/t.sessions END conversion,
+                   COALESCE(e.net_sales,0) net_sales, COALESCE(e.net_proceeds,0) net_proceeds,
+                   COALESCE(e.sponsored_products_charge,0) ad_spend,
+                   COALESCE(e.units_returned,0) returns, COALESCE(inv.inventory,0) inventory
+            FROM dim_product p
+            LEFT JOIN traffic t ON t.asin=p.asin
+            LEFT JOIN econ e ON e.asin=p.asin
+            LEFT JOIN inv ON inv.asin=p.asin
+            WHERE p.is_current=1 AND {where}
+              AND (COALESCE(t.sessions,0)>0 OR COALESCE(e.net_sales,0)<>0 OR COALESCE(inv.inventory,0)>0)
+            ORDER BY t.units DESC, t.sessions DESC
+            """,
+            [period_start, period_end, period_start, period_end, *params],
+        ).fetchall()
+    data = [dict(row) for row in rows]
+    conversions = sorted(row["conversion"] for row in data if row["conversion"] is not None)
+    median = conversions[len(conversions)//2] if conversions else 0
+    for row in data:
+        if row["inventory"] > 0 and row["sessions"] == 0:
+            row["diagnosis"] = "No traffic"
+        elif row["sessions"] >= 20 and row["units"] == 0:
+            row["diagnosis"] = "Traffic, no orders"
+        elif row["conversion"] is not None and row["conversion"] < median * 0.6:
+            row["diagnosis"] = "Conversion weakness"
+        elif row["inventory"] == 0 and row["units"] > 0:
+            row["diagnosis"] = "Inventory risk"
+        else:
+            row["diagnosis"] = "Healthy / monitor"
+    return data
+
+
+def previous_period(period_start):
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT period_start, period_end FROM business_traffic WHERE period_end < ? GROUP BY period_start, period_end ORDER BY period_end DESC LIMIT 1",
+            (period_start,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def action_queue(period_start, period_end, brand):
+    from datetime import date
+    current = product_diagnostics(period_start, period_end, brand)
+    previous = previous_period(period_start)
+    prior_rows = product_diagnostics(previous["period_start"], previous["period_end"], brand) if previous else []
+    prior = {row["asin"]: row for row in prior_rows}
+    days = (date.fromisoformat(period_end) - date.fromisoformat(period_start)).days + 1
+    old_days = (date.fromisoformat(previous["period_end"]) - date.fromisoformat(previous["period_start"])).days + 1 if previous else 1
+    actions = []
+    for row in current:
+        old = prior.get(row["asin"], {})
+        current_rate = row["ordered_sales"] / days
+        old_rate = old.get("ordered_sales", 0) / old_days
+        lost_revenue_30d = max(old_rate - current_rate, 0) * 30
+        sales_change = current_rate / old_rate - 1 if old_rate else None
+        current_traffic = row["sessions"] / days
+        old_traffic = old.get("sessions", 0) / old_days
+        traffic_change = current_traffic / old_traffic - 1 if old_traffic else None
+        cvr_change = (row.get("conversion") or 0) - (old.get("conversion") or 0)
+        item = None
+        if row["inventory"] >= 10 and row["sessions"] == 0:
+            item = (row["inventory"] * 2, "Inventory has no traffic", f"{row['inventory']:.0f} currently available FBA units recorded no sessions.", "Verify listing status, indexing, Buy Box, and advertising coverage.")
+        elif row["net_proceeds"] < 0 and row["ad_spend"] > 0:
+            item = (abs(row["net_proceeds"]) + row["ad_spend"], "Advertising allocation exceeds proceeds", f"Amazon allocated ${row['ad_spend']:,.0f} of Sponsored Products charges; net proceeds are -${abs(row['net_proceeds']):,.0f} before COGS.", "Inspect the campaign and search-term drivers before increasing traffic.")
+        elif sales_change is not None and sales_change < -0.2:
+            if traffic_change is not None and traffic_change < -0.15:
+                reason = f"Daily sales fell {abs(sales_change):.0%}, alongside a {abs(traffic_change):.0%} traffic decline; conversion changed {cvr_change:+.1%}."
+                next_step = "Recover qualified traffic, then validate conversion before changing price."
+            else:
+                reason = f"Daily sales fell {abs(sales_change):.0%}; traffic changed {(traffic_change or 0):+.0%} and conversion changed {cvr_change:+.1%}."
+                next_step = "Review price, offer quality, reviews, and search-term fit."
+            item = (lost_revenue_30d, "Sales run rate is down", reason, next_step)
+        elif row["diagnosis"] == "Conversion weakness" and row["sessions"] >= 40:
+            item = (row["ordered_sales"] * .25, "Traffic is not converting efficiently", f"The ASIN attracted {row['sessions']:.0f} sessions but converted only {(row['conversion'] or 0):.1%}.", "Evaluate price, promotion, reviews, variation placement, and search-term relevance.")
+        if item:
+            severity, headline, reason, next_step = item
+            actions.append({**row, "severity": severity, "estimated_30d_impact": lost_revenue_30d,
+                            "headline": headline, "reason": reason, "next_step": next_step})
+    return sorted(actions, key=lambda row: row["severity"], reverse=True)[:6], previous
+
+
+def market_context(brand):
+    if brand == "All" or brand not in MARKET_SNAPSHOTS:
+        return None
+    snapshot = MARKET_SNAPSHOTS[brand]
+    peers = snapshot["competitors"]
+    direct = [p for p in peers if p["segment"] in {"direct", "value"}]
+    own = snapshot["own"]
+    comparison_sales = own["sales"] + sum(p["sales"] for p in peers)
+    peer_changes = [p["sales_change"] for p in peers if p["sales_change"] is not None]
+    keyword_history = LITET_KEYWORD_HISTORY if brand == "Litet" else []
+    strategic_gaps = sorted(
+        [k for k in keyword_history if k["aug_volume"] and (k["aug_rank"] is None or k["aug_rank"] > 10)],
+        key=lambda k: k["aug_volume"], reverse=True)[:6]
+    return {**snapshot, "captured_at": CAPTURED_AT,
+            "direct_price_median": median([p["price"] for p in direct]),
+            "competitor_sales_median": median([p["sales"] for p in peers]),
+            "competitor_keyword_median": median([p["top10_keywords"] for p in peers]),
+            "review_gap": median([p["reviews"] for p in peers]) - own["reviews"],
+            "comparison_share": own["sales"] / comparison_sales if comparison_sales else None,
+            "peer_median_change": median(peer_changes) if peer_changes else None,
+            "keyword_history": keyword_history, "strategic_gaps": strategic_gaps}
+
+
+def family_diagnostics(period_start, period_end, brand):
+    rows = product_diagnostics(period_start, period_end, brand)
+    previous = previous_period(period_start)
+    old_rows = product_diagnostics(previous["period_start"], previous["period_end"], brand) if previous else []
+    def aggregate(source):
+        result = {}
+        for row in source:
+            b = result.setdefault(row["pack_type"], {"sales":0,"sessions":0,"units":0,"inventory":0,"net_proceeds":0,"ad_spend":0,"weakest":None,"weakest_conversion":None,"asins":[]})
+            b["asins"].append(row["asin"])
+            for key in ("sessions","units","inventory","net_proceeds","ad_spend"): b[key] += row[key] or 0
+            b["sales"] += row["ordered_sales"] or 0
+            if row["conversion"] is not None and (b["weakest_conversion"] is None or row["conversion"] < b["weakest_conversion"]):
+                b["weakest_conversion"], b["weakest"] = row["conversion"], f"{row['color'] or ''} {row['size'] or ''}".strip()
+        return result
+    current, old = aggregate(rows), aggregate(old_rows)
+    output=[]
+    for pack,row in current.items():
+        row["pack_type"]=pack; row["conversion"]=row["units"]/row["sessions"] if row["sessions"] else None
+        before=old.get(pack,{})
+        row["sales_change"]=row["sales"]/before["sales"]-1 if before.get("sales") else None
+        row["traffic_change"]=row["sessions"]/before["sessions"]-1 if before.get("sessions") else None
+        old_cvr=before.get("units",0)/before["sessions"] if before.get("sessions") else None
+        row["conversion_change"]=row["conversion"]-old_cvr if row["conversion"] is not None and old_cvr is not None else None
+        if row["sales_change"] is not None and row["sales_change"]<-.15:
+            row["diagnosis"]="Investigate"; row["decision_detail"]="Open the pack to isolate traffic vs conversion loss."
+        elif row["sales_change"] is not None and row["sales_change"]>.10:
+            row["diagnosis"]="Expand"; row["decision_detail"]="Validate inventory coverage and scalable PPC terms."
+        else:
+            row["diagnosis"]="Protect"; row["decision_detail"]="Maintain price and monitor mix."
+        output.append(row)
+    return sorted(output,key=lambda r:r["sales"],reverse=True)
+
+
+def ppc_decisions(period_start, period_end, brand):
+    where="1=1" if brand=="All" else "brand=?"; params=[] if brand=="All" else [brand]
+    with connect() as conn:
+        rows=conn.execute(f"""SELECT campaign_name,target,match_type,search_term,SUM(impressions) impressions,SUM(clicks) clicks,SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
+          CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos,CASE WHEN SUM(clicks)>0 THEN SUM(spend)/SUM(clicks) END cpc,CASE WHEN SUM(clicks)>0 THEN SUM(ad_orders)/SUM(clicks) END cvr
+          FROM ppc_fact_clean WHERE report_date BETWEEN ? AND ? AND {where} GROUP BY campaign_name,target,match_type,search_term HAVING SUM(spend)>0 ORDER BY SUM(spend) DESC LIMIT 30""",[period_start,period_end,*params]).fetchall()
+    rank_lookup = {k["phrase"].lower(): k for k in (LITET_KEYWORD_HISTORY if brand == "Litet" else [])}
+    data=[]
+    for raw in rows:
+        row=dict(raw)
+        keyword = rank_lookup.get((row["search_term"] or "").strip().lower()) or rank_lookup.get((row["target"] or "").strip().lower())
+        rank_change = (keyword["aug_rank"] - keyword["jul_rank"]) if keyword and keyword["jul_rank"] and keyword["aug_rank"] else None
+        if row["orders"]==0 and row["clicks"]>=8: action,confidence,reason="Review / negative","High","Enough clicks without an attributed order; confirm query relevance before negating."
+        elif row["acos"] is not None and row["acos"]>.55 and keyword and keyword["aug_rank"]<=10 and (rank_change is None or rank_change<=1): action,confidence,reason="Reduce cautiously","Medium","Organic rank is already strong and stable; lower in small steps while monitoring total sales."
+        elif row["acos"] is not None and row["acos"]>.55 and keyword and rank_change and rank_change>5: action,confidence,reason="Defend / restructure","High","Organic rank deteriorated while demand remained material; isolate converting queries instead of cutting broadly."
+        elif row["acos"] is not None and row["acos"]<=.30 and row["orders"]>=2: action,confidence,reason="Protect","Medium","Paid conversion is efficient; maintain while monitoring organic rank and total sales."
+        elif row["acos"] is not None and row["acos"]>.55: action,confidence,reason="Hold for evidence","Low","No exact Helium 10 rank match exists for this term, so a bid reduction is not yet supported."
+        else: action,confidence,reason="Monitor","Low","Insufficient evidence for a bid change."
+        organic_signal = (f"Organic #{keyword['aug_rank']} ({rank_change:+d} vs Jul)" if keyword and rank_change is not None
+                          else (f"Organic #{keyword['aug_rank']}" if keyword and keyword['aug_rank'] else "No exact rank match"))
+        row.update(action=action,confidence=confidence,reason=reason,organic_signal=organic_signal,keyword=keyword); data.append(row)
+    return data
+
+
+def keyword_playbook(period_start, period_end, brand):
+    """Convert PPC facts into a repeatable, campaign-addressable operating plan."""
+    if brand not in {"Has10","Litet"}:
+        return None
+    cost=cost_diagnosis(period_start,period_end,brand)
+    contribution_per_order=(cost["pre_ad_contribution"]/cost["net_units"]
+                            if cost["net_units"] else 0)
+    target_profit_per_order=(cost["net_sales"]/cost["net_units"]*.05
+                             if cost["net_units"] else 0)
+    allowable_ad_per_order=max(contribution_per_order-target_profit_per_order,0)
+    with connect() as conn:
+        rows=conn.execute("""SELECT campaign_name,target,match_type,search_term,
+                 SUM(impressions) impressions,SUM(clicks) clicks,SUM(spend) spend,
+                 SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
+                 CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos,
+                 CASE WHEN SUM(clicks)>0 THEN SUM(spend)/SUM(clicks) END cpc
+          FROM ppc_fact_clean
+          WHERE brand=? AND report_date BETWEEN ? AND ?
+          GROUP BY campaign_name,target,match_type,search_term
+          HAVING SUM(clicks)>0
+          ORDER BY SUM(ad_orders) DESC,SUM(spend) DESC""",
+          (brand,period_start,period_end)).fetchall()
+        target_rows=conn.execute("""SELECT campaign_name,target,match_type,
+                 SUM(clicks) clicks,SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
+                 CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos
+          FROM ppc_fact_clean
+          WHERE brand=? AND report_date BETWEEN ? AND ?
+          GROUP BY campaign_name,target,match_type""",
+          (brand,period_start,period_end)).fetchall()
+        freshness=conn.execute("""SELECT MIN(report_date) first_loaded_date,MAX(report_date) last_loaded_date,
+                 COUNT(DISTINCT report_date) loaded_days
+          FROM ppc_fact_clean WHERE brand=?""",(brand,)).fetchone()
+    target_lookup={(r["campaign_name"],r["target"],r["match_type"]):dict(r) for r in target_rows}
+    rank_lookup={k["phrase"].lower():k for k in (LITET_KEYWORD_HISTORY if brand=="Litet" else [])}
+    target_plan=[]
+    for raw in target_rows:
+        target=dict(raw)
+        target["cpc"]=target["spend"]/target["clicks"] if target["clicks"] else None
+        target["cvr"]=min(target["orders"]/target["clicks"],1) if target["clicks"] else None
+        target["modeled_max_cpc"]=(allowable_ad_per_order*target["cvr"]
+                                   if target["clicks"]>=5 and target["cvr"] is not None else None)
+        rank=rank_lookup.get((target["target"] or "").strip().lower())
+        if rank:
+            change=(rank["aug_rank"]-rank["jul_rank"] if rank.get("aug_rank") and rank.get("jul_rank") else None)
+            target["organic_evidence"]=(f"Organic #{rank['aug_rank']} ({change:+d} vs Jul)" if change is not None
+                                         else f"Organic #{rank['aug_rank']}" if rank.get("aug_rank") else "Not ranked")
+        else:
+            target["organic_evidence"]="No exact H10 rank match" if brand=="Litet" else "H10 keyword history not captured"
+        strong_organic=bool(rank and rank.get("aug_rank") and rank["aug_rank"]<=10)
+        if target["clicks"]>=8 and target["orders"]==0:
+            target["decision"]="Reduce bid 30%"; target["reason"]="Enough target-level clicks without an attributed order."
+        elif target["acos"] is not None and target["acos"]>1:
+            target["decision"]="Reduce bid 30%"; target["reason"]="Target-level spend exceeds attributed sales."
+        elif target["acos"] is not None and target["acos"]>.75:
+            cut=15 if strong_organic else 20
+            target["decision"]=f"Reduce bid {cut}%"; target["reason"]="Target-level ACoS is above the sustainable range; use a measured cut where organic rank is valuable."
+        elif target["acos"] is not None and target["acos"]>.50:
+            target["decision"]="Reduce bid 10%"; target["reason"]="The target converts, but the full target total is above the desired economics."
+        elif target["acos"] is not None and target["acos"]<=.30 and target["orders"]>=2:
+            target["decision"]="Hold bid"; target["reason"]="Target-level conversion is efficient; preserve while monitoring total sales."
+        else:
+            target["decision"]="Monitor"; target["reason"]="No target-level bid change is supported yet."
+        target_plan.append(target)
+    target_plan.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["target"].lower()))
+    focus=[]; reduce=[]; watch=[]
+    for raw in rows:
+        row=dict(raw)
+        row["target_total"]=target_lookup.get((row["campaign_name"],row["target"],row["match_type"]),{})
+        # Amazon attribution can place more orders than same-period clicks. Cap the
+        # observed rate for planning and suppress bid guidance on tiny samples.
+        observed_cvr=min(row["orders"]/row["clicks"],1) if row["clicks"] else 0
+        row["modeled_max_cpc"]=allowable_ad_per_order*observed_cvr if row["clicks"]>=5 else None
+        row["location"]=f"{row['campaign_name']} → {row['target']} ({row['match_type']})"
+        rank=rank_lookup.get((row["search_term"] or "").strip().lower()) or rank_lookup.get((row["target"] or "").strip().lower())
+        if rank:
+            change=(rank["aug_rank"]-rank["jul_rank"] if rank.get("aug_rank") and rank.get("jul_rank") else None)
+            row["organic_evidence"]=(f"Organic #{rank['aug_rank']} ({change:+d} vs Jul)" if change is not None
+                                     else f"Organic #{rank['aug_rank']}" if rank.get("aug_rank") else "Not ranked")
+        else:
+            row["organic_evidence"]="No exact H10 rank match" if brand=="Litet" else "H10 keyword history not captured"
+        discovered=(row["search_term"] or "").strip().lower() != (row["target"] or "").strip().lower()
+        if row["clicks"] < 5 or row["orders"] > row["clicks"]:
+            row["decision"]="Watch attribution"
+            row["instruction"]="The sample is too small—or attributed orders exceed same-period clicks—so do not create a dedicated target yet."
+            watch.append(row)
+        elif row["orders"]>=2 and row["acos"] is not None and row["acos"]<=.30:
+            row["decision"]="Harvest into EXACT" if discovered or row["match_type"]!="EXACT" else "Protect"
+            row["instruction"]=("Create this customer search term as EXACT in the matching color campaign; keep the source active at a controlled bid."
+                                if row["decision"]=="Harvest into EXACT" else "Hold the exact target and monitor total sales, not ACoS alone.")
+            focus.append(row)
+        elif row["orders"]>=2 and row["acos"] is not None and row["acos"]<=.50:
+            row["decision"]="Keep, lower CPC"
+            row["instruction"]="Keep because it converts, but move it to EXACT and lower the source bid 10–15% until CPC approaches the modeled ceiling."
+            focus.append(row)
+        elif row["clicks"]>=8 and (row["orders"]==0 or row["acos"] is None or row["acos"]>.65):
+            row["decision"]="Reduce source bid"
+            cut="30%" if row["orders"]==0 or (row["acos"] or 0)>1 else "20%"
+            row["instruction"]=f"Reduce this target in this campaign by {cut}; do not negate the customer term if it converts elsewhere."
+            reduce.append(row)
+        else:
+            row["decision"]="Watch"
+            row["instruction"]="Not enough reliable evidence for a dedicated target or negative yet."
+            watch.append(row)
+    focus.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["search_term"].lower()))
+    reduce.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["search_term"].lower()))
+    watch.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["search_term"].lower()))
+    objective=(f"Preserve the Has10 listing through the season while moving TaCoS toward {cost['break_even_tacos']:.0%} or lower."
+               if brand=="Has10" else
+               f"Protect Litet's proven traffic while moving TaCoS toward {cost['break_even_tacos']:.0%} or lower and checking organic rank before every material cut.")
+    return {"targets":target_plan,"focus":focus[:15],"reduce":reduce[:12],"watch":watch[:12],
+            "contribution_per_order":contribution_per_order,
+            "allowable_ad_per_order":allowable_ad_per_order,
+            "objective":objective,
+            "freshness":dict(freshness),"selected_start":period_start,"selected_end":period_end,
+            "method":"Customer search terms show what shoppers typed. Campaign, target, and match type show exactly where the traffic was purchased."}
+
+
+def ppc_organic_trend(brand):
+    if brand == "All": return {"months":[],"correlation":None}
+    with connect() as conn:
+        orders = conn.execute("""SELECT substr(o."purchase-date",1,7) month,SUM(CAST(o.quantity AS REAL)) total_units
+          FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
+          WHERE p.canonical_brand=? AND o."order-status" NOT IN ('Cancelled','Pending')
+          GROUP BY 1 ORDER BY 1""",(brand,)).fetchall()
+        ads = conn.execute("""SELECT substr(report_date,1,7) month,SUM(ad_units) ad_units,SUM(spend) spend,SUM(ad_sales) ad_sales
+          FROM ppc_fact_clean WHERE brand=? GROUP BY 1 ORDER BY 1""",(brand,)).fetchall()
+        freshness = conn.execute("""SELECT
+          (SELECT MAX(substr(o."purchase-date",1,10)) FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1 WHERE p.canonical_brand=?) latest_order,
+          (SELECT MAX(report_date) FROM ppc_fact_clean WHERE brand=?) latest_ppc""",(brand,brand)).fetchone()
+    merged={r["month"]:{"month":r["month"],"total_units":r["total_units"] or 0,"ad_units":0,"spend":0,"ad_sales":0} for r in orders}
+    for r in ads:
+        b=merged.setdefault(r["month"],{"month":r["month"],"total_units":0,"ad_units":0,"spend":0,"ad_sales":0})
+        b.update(ad_units=r["ad_units"] or 0,spend=r["spend"] or 0,ad_sales=r["ad_sales"] or 0)
+    months=[]
+    latest_incomplete=min(freshness["latest_order"] or "9999-12-31",freshness["latest_ppc"] or "9999-12-31")[:7]
+    for b in sorted(merged.values(),key=lambda x:x["month"]):
+        b["non_ad_units_proxy"]=max(b["total_units"]-b["ad_units"],0)
+        b["is_partial"]=b["month"]>=latest_incomplete
+        months.append(b)
+    complete=[m for m in months if m["total_units"] and m["spend"] and not m["is_partial"]]
+    def correlation(xs,ys):
+        if len(xs)<6: return None
+        xm=sum(xs)/len(xs); ym=sum(ys)/len(ys)
+        den=(sum((x-xm)**2 for x in xs)*sum((y-ym)**2 for y in ys))**.5
+        return sum((x-xm)*(y-ym) for x,y in zip(xs,ys))/den if den else None
+    spend=[m["spend"] for m in complete]
+    total=[m["total_units"] for m in complete]
+    non_ad=[m["non_ad_units_proxy"] for m in complete]
+    spend_changes=[spend[i]-spend[i-1] for i in range(1,len(spend))]
+    non_ad_changes=[non_ad[i]-non_ad[i-1] for i in range(1,len(non_ad))]
+    same_period=correlation(spend,non_ad)
+    return {"months":months[-12:],"correlation":same_period,
+            "total_correlation":correlation(spend,total),
+            "change_correlation":correlation(spend_changes,non_ad_changes),
+            "lagged_correlation":correlation(spend[:-1],non_ad[1:]),
+            "sample_months":len(complete),
+            "analysis_start":complete[0]["month"] if complete else None,
+            "analysis_end":complete[-1]["month"] if complete else None,
+            "definition":"Non-ad proxy = total ordered units minus PPC-attributed units. Amazon attribution windows and seasonality can create timing noise."}
+
+
+def keyword_opportunities(period_start, period_end, brand):
+    source=(HAS10_KEYWORD_OPPORTUNITIES if brand=="Has10" else
+            LITET_PARENT_KEYWORD_OPPORTUNITIES if brand=="Litet" else [])
+    if not source: return []
+    phrases=[row["phrase"] for row in source]
+    marks=",".join("?" for _ in phrases)
+    with connect() as conn:
+        rows=conn.execute(f"""SELECT lower(search_term) phrase,campaign_name,target,match_type,
+          SUM(clicks) clicks,SUM(spend) spend,SUM(ad_orders) orders,SUM(ad_sales) ad_sales,
+          CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos
+          FROM ppc_fact_clean WHERE brand=? AND report_date BETWEEN ? AND ?
+            AND lower(search_term) IN ({marks})
+          GROUP BY lower(search_term),campaign_name,target,match_type
+          ORDER BY lower(search_term),SUM(ad_orders) DESC,SUM(spend) DESC""",
+          [brand,period_start,period_end,*phrases]).fetchall()
+        target_rows=conn.execute("""SELECT campaign_name,target,match_type,SUM(clicks) clicks,
+          SUM(spend) spend,SUM(ad_orders) orders,SUM(ad_sales) ad_sales,
+          CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos
+          FROM ppc_fact_clean WHERE brand=? AND report_date BETWEEN ? AND ?
+          GROUP BY campaign_name,target,match_type""",(brand,period_start,period_end)).fetchall()
+    target_lookup={(r["campaign_name"],r["target"],r["match_type"]):dict(r) for r in target_rows}
+    by_phrase={}
+    for raw in rows:
+        row=dict(raw); by_phrase.setdefault(row["phrase"],[]).append(row)
+    output=[]
+    for source_row in source:
+        item=dict(source_row); evidence=by_phrase.get(item["phrase"],[])
+        item["clicks"]=sum(r["clicks"] or 0 for r in evidence)
+        item["orders"]=sum(r["orders"] or 0 for r in evidence)
+        item["spend"]=sum(r["spend"] or 0 for r in evidence)
+        item["ad_sales"]=sum(r["ad_sales"] or 0 for r in evidence)
+        item["acos"]=item["spend"]/item["ad_sales"] if item["ad_sales"] else None
+        best=next((r for r in evidence if (r["orders"] or 0)>0),evidence[0] if evidence else None)
+        item["campaign_name"]=best["campaign_name"] if best else None
+        item["target"]=best["target"] if best else None
+        item["match_type"]=best["match_type"] if best else None
+        target_total=target_lookup.get((item["campaign_name"],item["target"],item["match_type"]),{}) if best else {}
+        item["primary_clicks"]=target_total.get("clicks",0)
+        item["primary_orders"]=target_total.get("orders",0)
+        item["primary_spend"]=target_total.get("spend",0)
+        item["primary_ad_sales"]=target_total.get("ad_sales",0)
+        item["primary_acos"]=target_total.get("acos")
+        item["query_orders"]=best["orders"] if best else 0
+        item["query_spend"]=best["spend"] if best else 0
+        item["query_acos"]=best["acos"] if best else None
+        item["campaign_paths"]=len(evidence)
+        phrase=item["phrase"].strip().lower()
+        target=(item["target"] or "").strip().lower()
+        discovered=bool(best and phrase!=target)
+        query_efficient=(item["query_orders"]>=2 and item["query_acos"] is not None
+                         and item["query_acos"]<=.50)
+        campaign=item["campaign_name"] or "the converting campaign"
+        target_label=item["target"] or item["phrase"]
+        match=(item["match_type"] or "target").upper()
+        if discovered and query_efficient:
+            item["action"]="Harvest into EXACT"
+            item["instruction"]=(f"Add ‘{item['phrase']}’ as EXACT in {campaign}; keep the source "
+                                 f"‘{target_label}’ {match} active and review organic rank after 7 days.")
+            item["priority"]=11000+item["search_volume"]+item["query_orders"]*100
+        elif discovered:
+            item["action"]="Do not harvest"
+            item["instruction"]=(f"Do not add ‘{item['phrase']}’ as EXACT yet. Its matching query has not "
+                                 f"proven efficient conversion; manage ‘{target_label}’ {match} separately in the targeting table.")
+            item["priority"]=2500+item["search_volume"]
+        elif item["primary_acos"] is not None and item["primary_acos"]>.75:
+            cut=20 if item["rank"]>20 else 15
+            item["action"]=f"Reduce target bid {cut}%"
+            item["instruction"]=(f"In {campaign}, reduce ‘{target_label}’ {match} by {cut}%; keep it active "
+                                 "and review total sales plus organic rank after 7 days.")
+            item["priority"]=9500+item["search_volume"]
+        elif item["primary_acos"] is not None and item["primary_acos"]>.55:
+            item["action"]="Reduce target bid 10%"
+            item["instruction"]=(f"In {campaign}, reduce ‘{target_label}’ {match} by 10%; keep it active "
+                                 "and review total sales plus organic rank after 7 days.")
+            item["priority"]=9000+item["search_volume"]
+        elif not best or item["primary_orders"]==0:
+            item["action"]="Do not fund yet"
+            item["instruction"]="No converting matching query appears in the selected period; make no new bid until paid conversion is proven."
+            item["priority"]=2000+item["search_volume"]
+        elif item["rank"]<=30 and item["query_orders"]>=2:
+            item["action"]="Controlled EXACT test"
+            item["instruction"]=(f"Isolate ‘{item['phrase']}’ as EXACT in {campaign}; hold the source bid and "
+                                 "review contribution and organic rank after 7 days.")
+            item["priority"]=7000+item["search_volume"]
+        else:
+            item["action"]="Hold current target"
+            item["instruction"]=(f"Leave ‘{target_label}’ {match} unchanged in {campaign}; the selected period "
+                                 "does not support a bid change or a new EXACT target.")
+            item["priority"]=3000+item["search_volume"]
+        output.append(item)
+    return sorted(output,key=lambda r:r["priority"],reverse=True)
+
+
+def executive_actions(period_start, period_end, brand, ranked_actions):
+    if not ranked_actions:
+        return {"headline":"No material intervention is supported","steps":[],"evidence":""}
+    top=ranked_actions[0]
+    if brand == "Has10":
+        metrics=overview(period_start,period_end,brand)
+        products=product_diagnostics(period_start,period_end,brand)
+        ppc=ppc_decisions(period_start,period_end,brand)
+        from datetime import date
+        days=(date.fromisoformat(period_end)-date.fromisoformat(period_start)).days+1
+
+        def ppc_row(campaign, query):
+            return next((r for r in ppc if r["campaign_name"] == campaign and
+                         (r["search_term"] or "").lower() == query.lower()), None)
+
+        def pct(value):
+            return f"{value:.0%}" if value is not None else "—"
+
+        blue_generic=ppc_row("Has10 | Blue | Historic Keywords", "cleat covers")
+        orange_generic=ppc_row("Cleat_Covers_Orange", "cleat covers")
+        orange_exact=ppc_row("Cleat_Covers_Orange", "orange cleat covers")
+        black_generic=ppc_row("Cleat_Covers_Black", "cleat covers")
+        black_football=ppc_row("Cleat_Covers_Black", "football cleat covers")
+
+        stocked=[]
+        for row in products:
+            if row["units"] > 0 and row["inventory"] > 0:
+                stocked.append({**row,"cover_days":row["inventory"]/(row["units"]/days)})
+        stocked.sort(key=lambda r:r["cover_days"])
+        urgent=[r for r in stocked if r["cover_days"] < 28][:3]
+        steps=[]
+        cost=cost_diagnosis(period_start,period_end,brand)
+        avg_net_price=cost["net_sales"]/cost["net_units"] if cost["net_units"] else 0
+        ad_allowance=max(cost["pre_ad_contribution"]/cost["net_units"]-avg_net_price*.05,0) if cost["net_units"] else 0
+        steps.append({"action":f"Bring TaCoS below {cost['break_even_tacos']:.0%}; at current sales, that means removing at least ${cost['ad_reduction_to_break_even']:,.0f} of unproductive MTD-equivalent spend.",
+                      "why":f"Has10 earns ${cost['pre_ad_contribution']:,.0f} before advertising, but ads consumed ${cost['ads']:,.0f}. This is the minimum modeled improvement to reach break-even; protect total sales while making the campaign changes below."})
+        if urgent:
+            labels=", ".join(f"{r['color']} {r['size']} ({r['cover_days']:.0f} days FBA cover)" for r in urgent)
+            replenish_step={"action":f"Protect availability for {labels}.",
+                            "why":"These are the shortest-cover selling variations at the current August pace. Confirm AWD/inbound quantities before choosing the transfer quantity; this view currently measures available FBA stock."}
+        if orange_generic and orange_exact:
+            exact_bid=ad_allowance*min(orange_exact["orders"]/orange_exact["clicks"],1) if orange_exact["clicks"] else 0
+            steps.append({"action":f"Add ‘orange cleat covers’ as EXACT with a modeled CPC ceiling near ${exact_bid:.2f}; reduce Orange campaign ‘cleat covers’ BROAD by 30%.",
+                          "why":f"The color-specific query produced {orange_exact['orders']:.0f} orders at {pct(orange_exact['acos'])} ACoS, while the generic broad path spent ${orange_generic['spend']:.2f} at {pct(orange_generic['acos'])} ACoS."})
+        if black_generic and black_football:
+            exact_bid=ad_allowance*min(black_football["orders"]/black_football["clicks"],1) if black_football["clicks"] else 0
+            steps.append({"action":f"Add ‘football cleat covers’ as EXACT in Black with a modeled CPC ceiling near ${exact_bid:.2f}; reduce Black ‘cleat covers’ PHRASE by 30%.",
+                          "why":f"‘Football cleat covers’ produced {black_football['orders']:.0f} orders at {pct(black_football['acos'])} ACoS. The generic query spent ${black_generic['spend']:.2f} at {pct(black_generic['acos'])} ACoS."})
+        if blue_generic:
+            steps.append({"action":"Reduce Blue ‘cleat covers’ PHRASE by 20%; preserve its youth queries.",
+                          "why":f"The generic query is at {pct(blue_generic['acos'])} ACoS, but ‘youth cleat covers’ and ‘cleat covers youth’ are converting. Use a small cut to avoid suppressing qualified seasonal demand."})
+        steps.append({"action":"Keep the $13.99 base price; do not answer the current profit pressure with a broad price cut.",
+                      "why":"Has10 is already below the $15.49 direct-competitor median. Current contribution is being pressured by advertising allocation, while total August demand is accelerating versus the preceding period."})
+        if urgent:
+            steps.append(replenish_step)
+        productive=[r for r in ppc if r["orders"]>=2 and r["acos"] is not None and r["acos"]<=.50][:5]
+        contribution=metrics["contribution_after_cogs"]
+        contribution_text=f"-${abs(contribution):,.0f}" if contribution < 0 else f"${contribution:,.0f}"
+        return {"headline":"Protect the seasonal sales surge, but move spend from generic traffic into proven color and football queries.",
+                "steps":steps,"productive_terms":productive,
+                "evidence":f"August ordered sales are ${metrics['ordered_sales']:,.0f}; TaCoS is {metrics['tacos']:.1%} and estimated contribution after COGS is {contribution_text} ({metrics['contribution_margin']:.1%})."}
+    if brand != "Litet":
+        impact=top.get("estimated_30d_impact") or top.get("severity") or 0
+        return {"headline":f"Prioritize {top['color'] or ''} {top['size'] or ''}",
+                "steps":[{"action":top["next_step"],"why":top["reason"]}],
+                "evidence":f"Approximately ${impact:,.0f} of measured exposure is attached to this alert."}
+    case=pricing_case(period_start,period_end,brand,top["asin"])
+    ppc=ppc_decisions(period_start,period_end,brand)
+    litet_playbook=keyword_playbook(period_start,period_end,brand)
+    playbook_rows=(litet_playbook["focus"]+litet_playbook["reduce"]+litet_playbook["watch"] if litet_playbook else [])
+    def target_total(campaign,target,match_type):
+        row=next((r for r in playbook_rows if r["campaign_name"]==campaign and r["target"]==target and r["match_type"]==match_type),None)
+        return row.get("target_total",{}) if row else {}
+    def term(search_term,target=None):
+        return next((r for r in ppc if r["search_term"].lower()==search_term.lower() and (target is None or r["target"].lower()==target.lower())),None)
+    white=term("white cycling socks","white cycling socks")
+    cycling=term("cycling socks","cycling socks")
+    white_target=target_total("LITET Ranking Campaign","white cycling socks","PHRASE")
+    cycling_target=target_total("LITET Ranking Campaign","cycling socks","BROAD")
+    men_good=term("cycling socks for men","men cycling socks")
+    men_bad=term("cycling socks for men","road cycling socks men")
+    productive=[r for r in ppc if r["orders"]>=1 and r["acos"] is not None and r["acos"]<=.30][:5]
+    steps=[]
+    price_candidate=case["scenarios"][1] if len(case["scenarios"])>1 else None
+    candidate_text=(f"If returns normalize, ${price_candidate['price']:.2f} is the first test candidate and needs {price_candidate['lift_needed']:.0%} more net units to preserve contribution."
+                    if price_candidate and price_candidate.get("lift_needed") is not None else
+                    "The selected range does not support a contribution-preserving lower-price scenario.")
+    return_rate_text=f"{case['return_rate']:.0%}" if case.get("return_rate") is not None else "not yet measurable"
+    steps.append({"action":f"Hold {top['color']} {top['size']} {top['pack_type']} at ${case['current_price']:.2f} for now.",
+                  "why":f"Its settled return rate is {return_rate_text} and {case['current_units']:.0f} net units settled; price elasticity is not reliable yet. {candidate_text}"})
+    steps.append({"action":"Do not change PPC because of this 3-pack decline.",
+                  "why":"The campaigns advertise the hero ASIN, not this 3-pack child. PPC may support the parent, but it is not a direct traffic lever for B0FFPT16G6."})
+    if white:
+        steps.append({"action":"In LITET Ranking Campaign, reduce the ‘white cycling socks’ PHRASE bid by 15%.",
+                      "why":f"The full target spent ${white_target.get('spend',white['spend']):.2f} at {white_target.get('acos',white['acos']):.0%} ACoS; the ‘white cycling socks’ customer query is only one component. Sponsored rank is #1 while organic rank is #6. Measure total units and organic rank for 7 days—do not pause it."})
+    if cycling:
+        steps.append({"action":"In LITET Ranking Campaign, reduce the ‘cycling socks’ BROAD bid by 10%.",
+                      "why":f"The full broad target spent ${cycling_target.get('spend',cycling['spend']):.2f} at {cycling_target.get('acos',cycling['acos']):.0%} ACoS; the exact-match customer query shown in the detail table is only part of that total. Organic rank is stable at #16 and sponsored rank is #3, so use a small reduction rather than a shutdown."})
+    if men_good and men_bad:
+        suggested=(men_good["cpc"] or 0)*.9
+        steps.append({"action":f"Add ‘cycling socks for men’ as EXACT at about ${suggested:.2f}; in LITET Scale, reduce the overlapping ‘road cycling socks men’ BROAD bid by 20%.",
+                      "why":f"The discovery path produced {men_good['orders']:.0f} orders at {men_good['acos']:.0%} ACoS. The overlapping scale path spent ${men_bad['spend']:.2f} across {men_bad['clicks']:.0f} clicks with no orders."})
+    steps.append({"action":"Add no negative keywords today; put women’s and DeFeet queries on a 7-day watchlist.",
+                  "why":"Those queries have not accumulated enough clicks individually to justify blocking them, and women’s cycling socks remains relevant to a unisex listing."})
+    return {"headline":f"Prioritize {top['color']} {top['size']} {top['pack_type']}—but separate the product decision from hero-ASIN PPC.",
+            "steps":steps,"productive_terms":productive,
+            "evidence":f"Ordered-sales run rate fell; approximately ${top['estimated_30d_impact']:,.0f} of 30-day ordered revenue is at risk."}
+
+
+def pricing_case(period_start, period_end, brand, asin=None):
+    products=product_diagnostics(period_start,period_end,brand)
+    product=next((p for p in products if p["asin"]==asin),None) if asin else None
+    if product is None:
+        candidates=[p for p in products if p["units"]>0 and p["net_sales"]>0]
+        product=min(candidates,key=lambda p:p["conversion"] if p["conversion"] is not None else 999) if candidates else None
+    if not product: return None
+    with connect() as conn:
+        econ=conn.execute("""SELECT asin,MIN(period_start) period_start,MAX(period_end) period_end,
+          CASE WHEN COUNT(*)=1 THEN MAX(period_type) ELSE 'range' END period_type,
+          CASE WHEN SUM(units_sold)>0 THEN SUM(net_sales)/SUM(units_sold) END average_sales_price,
+          SUM(units_sold) units_sold,SUM(units_returned) units_returned,SUM(net_units_sold) net_units_sold,
+          SUM(net_sales) net_sales,SUM(net_proceeds) net_proceeds,SUM(referral_fee) referral_fee,
+          SUM(referral_fee_refunds) referral_fee_refunds,
+          COALESCE((SELECT unit_cogs FROM cogs_ledger c WHERE c.asin=? AND c.effective_start<=? AND (c.effective_end IS NULL OR c.effective_end>=?) ORDER BY c.effective_start DESC LIMIT 1),0) unit_cogs
+          FROM asin_economics WHERE asin=? AND period_start>=? AND period_end<=? GROUP BY asin""",
+          (product["asin"],period_end,period_start,product["asin"],period_start,period_end)).fetchone()
+        history=conn.execute("""SELECT substr("purchase-date",1,7) month,SUM(CAST(quantity AS REAL)) units,
+          SUM(CAST("item-price" AS REAL)-COALESCE(CAST("item-promotion-discount" AS REAL),0)) sales
+          FROM orders WHERE asin=? AND "order-status" NOT IN ('Cancelled','Pending') GROUP BY 1 HAVING SUM(CAST(quantity AS REAL))>0 ORDER BY 1""",(product["asin"],)).fetchall()
+        settled_history=conn.execute("""SELECT period_start,period_end,average_sales_price,units_sold,units_returned,
+          net_units_sold,net_sales,net_proceeds FROM asin_economics
+          WHERE asin=? AND period_type='monthly' AND period_end<? ORDER BY period_end DESC LIMIT 6""",
+          (product["asin"],period_start)).fetchall()
+        monthly_evidence=conn.execute("""SELECT e.period_start,e.period_end,e.average_sales_price,e.units_sold,e.units_returned,
+          e.net_units_sold,e.net_sales,e.net_proceeds,MAX(t.sessions_total) sessions,SUM(t.units_ordered) ordered_units
+          FROM asin_economics e LEFT JOIN business_traffic t ON t.child_asin=e.asin
+            AND t.period_start=e.period_start AND t.period_end=e.period_end
+          WHERE e.asin=? AND e.period_type='monthly' AND e.period_end<?
+          GROUP BY e.period_start,e.period_end ORDER BY e.period_end DESC LIMIT 8""",
+          (product["asin"],period_start)).fetchall()
+        cogs_record=conn.execute("""SELECT unit_cogs,source FROM cogs_ledger WHERE asin=?
+          AND effective_start<=? AND (effective_end IS NULL OR effective_end>=?)
+          ORDER BY effective_start DESC LIMIT 1""",(product["asin"],period_end,period_start)).fetchone()
+    econ=dict(econ) if econ else {}; units=product["units"] or econ.get("units_sold") or 0
+    current_price=product["ordered_sales"]/units if units else None; net_units=max(econ.get("net_units_sold") or units or 1,1); cogs=econ.get("unit_cogs") or 0
+    current_contribution=(econ.get("net_proceeds") or product["net_proceeds"] or 0)-cogs*net_units; cpu=current_contribution/net_units
+    referral=abs((econ.get("referral_fee") or 0)+(econ.get("referral_fee_refunds") or 0)); referral_rate=min(referral/(econ.get("net_sales") or product["net_sales"] or 1),.30)
+    scenarios=[]
+    if current_price:
+        for drop in (0,1,2):
+            new_cpu=cpu-drop*(1-referral_rate); needed=current_contribution/new_cpu if new_cpu>0 else None
+            scenarios.append({"price":current_price-drop,"contribution_per_unit":new_cpu,"units_needed":needed,"lift_needed":needed/net_units-1 if needed else None})
+    price_history=[{"month":r["month"],"units":r["units"],"price":r["sales"]/r["units"] if r["units"] else None} for r in history]
+    price_levels={round(r["price"],2) for r in price_history if r["price"]}
+    sold_units=econ.get("units_sold") or 0; returned=econ.get("units_returned") or 0
+    return_rate=returned/sold_units if sold_units else None
+    rolling={"sold_units":sum(r["units_sold"] or 0 for r in settled_history),
+             "returned_units":sum(r["units_returned"] or 0 for r in settled_history),
+             "net_units":sum(r["net_units_sold"] or 0 for r in settled_history),
+             "net_sales":sum(r["net_sales"] or 0 for r in settled_history),
+             "net_proceeds":sum(r["net_proceeds"] or 0 for r in settled_history)}
+    rolling["return_rate"]=rolling["returned_units"]/rolling["sold_units"] if rolling["sold_units"] else None
+    rolling["contribution"]=rolling["net_proceeds"]-rolling["net_units"]*cogs
+    rolling["contribution_per_unit"]=rolling["contribution"]/rolling["net_units"] if rolling["net_units"] else None
+    monthly=[]
+    for r in reversed(monthly_evidence):
+        d=dict(r); d["conversion"]=d["ordered_units"]/d["sessions"] if d["sessions"] else None
+        d["period_label"]=d["period_start"][:7]; d["is_partial"]=False; monthly.append(d)
+    if econ:
+        selected_label=(f"{period_start[:7]} MTD" if econ.get("period_type")=="custom" else
+                        f"{period_start} to {period_end}" if econ.get("period_type")=="range" else period_start[:7])
+        current_month={"period_start":period_start,"period_end":period_end,
+                       "period_label":selected_label,
+                       "is_partial":econ.get("period_type") in {"custom","range"},
+                       "average_sales_price":econ.get("average_sales_price"),
+                       "sessions":product["sessions"],"ordered_units":product["units"],
+                       "conversion":product["conversion"],"units_sold":sold_units,
+                       "units_returned":returned,"net_units_sold":net_units,
+                       "net_sales":econ.get("net_sales") or 0,"net_proceeds":econ.get("net_proceeds") or 0}
+        monthly.append(current_month)
+    bands={}
+    for row in monthly:
+        if row["is_partial"] or row["average_sales_price"] is None:
+            continue
+        level=round(row["average_sales_price"])
+        band=bands.setdefault(level,{"price":level,"sessions":0,"ordered_units":0,"months":0})
+        band["sessions"]+=row["sessions"] or 0; band["ordered_units"]+=row["ordered_units"] or 0; band["months"]+=1
+    price_bands=[]
+    for band in sorted(bands.values(),key=lambda b:b["price"]):
+        band["conversion"]=band["ordered_units"]/band["sessions"] if band["sessions"] else None
+        price_bands.append(band)
+    historical_decision_ready=rolling["net_units"]>=30 and len(price_bands)>=2
+    if historical_decision_ready and current_price:
+        baseline_units=rolling["net_units"]
+        baseline_cpu=rolling["contribution_per_unit"]
+        baseline_contribution=rolling["contribution"]
+        scenarios=[]
+        for drop in (0,1,2):
+            new_cpu=baseline_cpu-drop*(1-referral_rate); needed=baseline_contribution/new_cpu if new_cpu>0 else None
+            scenarios.append({"price":current_price-drop,"contribution_per_unit":new_cpu,
+                              "units_needed":needed,"lift_needed":needed/baseline_units-1 if needed else None})
+    data_quality=[]
+    if net_units<10: data_quality.append(f"Only {net_units:.0f} net settled units: unit economics are too sensitive for a confident price decision.")
+    if return_rate is not None and return_rate>.15: data_quality.append(f"Return rate is {return_rate:.0%}; returns, not price, dominate current contribution.")
+    if len(price_levels)<3: data_quality.append("Historical price variation is insufficient to estimate elasticity reliably.")
+    candidate=scenarios[1] if len(scenarios)>1 else None
+    if historical_decision_ready:
+        verdict="Hold current price; historical evidence does not isolate price as the conversion cause"
+    elif data_quality: verdict="Do not change price from this evidence alone"
+    elif candidate and candidate.get("lift_needed") is not None and candidate["lift_needed"]>.35: verdict="Price drop is unlikely to preserve contribution"
+    else: verdict="Controlled price test is financially plausible"
+    market=market_context(brand); benchmark=None
+    if market and product["pack_type"]=="single": benchmark={"name":"direct/value median","checkout":market["direct_price_median"],"per_unit":market["direct_price_median"]}
+    elif market and brand=="Litet" and product["pack_type"]=="3-pack": benchmark={"name":"Thirty48 3-pair","checkout":24.95,"per_unit":8.32}
+    price_gap=(current_price-benchmark["checkout"])/benchmark["checkout"] if current_price and benchmark and benchmark["checkout"] else None
+    if historical_decision_ready:
+        band_text="; ".join(f"${b['price']:.0f} months converted at {b['conversion']:.1%}" for b in price_bands)
+        next_step=f"Hold ${current_price:.2f}. Completed-month evidence does not support a discount: {band_text}. Monitor MTD returns until settlement catches up."
+    else:
+        next_step="Do not launch this price test yet. Use a longer settled economics window or select a higher-volume SKU."
+    return {"product":product,"current_price":current_price,"current_units":net_units,"ordered_units":units,
+            "sold_units":sold_units,"returned_units":returned,"return_rate":return_rate,
+            "current_contribution":current_contribution,"referral_rate":referral_rate,"scenarios":scenarios,
+            "market":market,"price_benchmark":benchmark,"price_gap":price_gap,"price_history":price_history[-12:],"price_levels":len(price_levels),
+            "data_quality":data_quality,"verdict":verdict,"rolling":rolling,"monthly_evidence":monthly,
+            "price_bands":price_bands,"historical_decision_ready":historical_decision_ready,"next_step":next_step,
+            "cogs_source":cogs_record["source"] if cogs_record else None,
+            "cogs_is_placeholder":bool(cogs_record and "placeholder" in (cogs_record["source"] or "").lower())}
