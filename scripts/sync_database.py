@@ -10,6 +10,11 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 REQUIRED_TABLES = {
     "orders", "business_traffic", "asin_economics", "inventory_snapshots",
@@ -72,4 +77,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
