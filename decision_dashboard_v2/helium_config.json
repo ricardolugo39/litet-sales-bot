@@ -1,0 +1,44 @@
+{
+  "marketplace": "US",
+  "brands": {
+    "Litet": {
+      "parent_asin": "B0DSCFD253",
+      "competitor_seeds": [
+        {"name": "Danish Endurance", "asin": "B0DFZ1VPZZ", "segment": "multipack"},
+        {"name": "ROCKBROS", "asin": "B0DCBH63V1", "segment": "direct"},
+        {"name": "Swiftwick Aspire Crew", "asin": "B0C37J37ZQ", "segment": "premium"},
+        {"name": "Swiftwick Aspire Quarter", "asin": "B0C38XTCB6", "segment": "premium"},
+        {"name": "SILCA Aero", "asin": "B0C5NBHW4Q", "segment": "premium"},
+        {"name": "Swiftwick Aspire Four", "asin": "B0C39GR81W", "segment": "premium"},
+        {"name": "Thirty48", "asin": "B094MKDD1V", "segment": "multipack"},
+        {"name": "TODO PRO", "asin": "B0D1VWP4X2", "segment": "direct"},
+        {"name": "White Aero", "asin": "B0B6N2HLYJ", "segment": "value"},
+        {"name": "Castelli Espresso", "asin": "B0DMB32RJH", "segment": "premium"}
+      ],
+      "keywords": [
+        "thin cycling socks", "cycling socks white", "aero socks cycling",
+        "cycling aero socks", "aero cycling socks", "road cycling socks",
+        "cycling socks for men", "cycling socks", "aero socks",
+        "black cycling socks", "bicycling socks", "summer cycling socks lightweight"
+      ]
+    },
+    "Has10": {
+      "parent_asin": "B0CHMVPCC7",
+      "competitor_seeds": [
+        {"name": "SLEEFS", "asin": "B01MQFTUHM", "segment": "direct"},
+        {"name": "TD Spats", "asin": "B087QWJDGF", "segment": "direct"},
+        {"name": "TCK", "asin": "B014BKMDJU", "segment": "value"},
+        {"name": "Gridiron Gladiator", "asin": "B09BD29ZZ5", "segment": "value"},
+        {"name": "Exxact Sports", "asin": "B0BH16HF4B", "segment": "direct"},
+        {"name": "TUYUU", "asin": "B0DNF5KNTS", "segment": "direct"}
+      ],
+      "keywords": [
+        "youth cleat covers", "cleat covers football", "football cleat covers",
+        "cleat spats", "youth football spats", "kids cleat covers football youth",
+        "spats football youth", "cleat covers youth",
+        "youth football spats for cleats", "football spats for cleats",
+        "football cleat covers youth", "football spats", "spats football"
+      ]
+    }
+  }
+}

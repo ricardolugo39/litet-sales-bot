@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from datetime import date
 from statistics import median
 from pathlib import Path
 
@@ -7,8 +8,10 @@ from dotenv import load_dotenv
 
 if __package__:
     from .competitor_data import CAPTURED_AT, HAS10_KEYWORDS_CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORDS_CAPTURED_AT, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
+    from .helium_store import latest_snapshot
 else:  # Supports `python app.py` from this directory.
     from competitor_data import CAPTURED_AT, HAS10_KEYWORDS_CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORDS_CAPTURED_AT, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
+    from helium_store import latest_snapshot
 
 
 load_dotenv()
@@ -26,6 +29,69 @@ def connect():
     conn = sqlite3.connect(database_path())
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def helium_data():
+    """Return the latest complete DB snapshot, with the curated file as fallback."""
+    live = latest_snapshot(database_path())
+    if not live:
+        return {
+            "captured_at": CAPTURED_AT,
+            "markets": MARKET_SNAPSHOTS,
+            "keywords": {
+                "Litet": LITET_PARENT_KEYWORD_OPPORTUNITIES,
+                "Has10": HAS10_KEYWORD_OPPORTUNITIES,
+            },
+            "keyword_dates": {
+                "Litet": LITET_KEYWORDS_CAPTURED_AT,
+                "Has10": HAS10_KEYWORDS_CAPTURED_AT,
+            },
+            "history": {"Litet": LITET_KEYWORD_HISTORY, "Has10": []},
+            "source": "curated_fallback",
+        }
+    markets = {}
+    keywords = {}
+    history = {}
+    keyword_dates = {}
+    for brand, brand_data in live["brands"].items():
+        fallback = MARKET_SNAPSHOTS.get(brand, {})
+        markets[brand] = {
+            "own_parent": brand_data["parent_asin"],
+            "own": brand_data["own"],
+            "competitors": brand_data["competitors"],
+            "pack_benchmarks": brand_data.get(
+                "pack_benchmarks", fallback.get("pack_benchmarks", [])
+            ),
+        }
+        keywords[brand] = brand_data["keywords"]
+        history[brand] = brand_data.get("keyword_history", [])
+        keyword_dates[brand] = brand_data.get("keywords_captured_at", live["captured_at"])
+    return {
+        "captured_at": live["captured_at"],
+        "markets": markets,
+        "keywords": keywords,
+        "keyword_dates": keyword_dates,
+        "history": history,
+        "source": "helium10_mcp",
+    }
+
+
+def _keyword_history(brand):
+    helium = helium_data()
+    history = helium["history"].get(brand, [])
+    if history:
+        return history
+    return [
+        {
+            "phrase": row["phrase"],
+            "jul_rank": None,
+            "aug_rank": row.get("rank"),
+            "jul_volume": None,
+            "aug_volume": row.get("search_volume"),
+            "aug_sponsored_rank": row.get("sponsored_rank"),
+        }
+        for row in helium["keywords"].get(brand, [])
+    ]
 
 
 def periods():
@@ -617,24 +683,27 @@ def action_queue(period_start, period_end, brand):
 
 
 def market_context(brand):
-    if brand == "All" or brand not in MARKET_SNAPSHOTS:
+    helium = helium_data()
+    if brand == "All" or brand not in helium["markets"]:
         return None
-    snapshot = MARKET_SNAPSHOTS[brand]
+    snapshot = helium["markets"][brand]
     peers = snapshot["competitors"]
     direct = [p for p in peers if p["segment"] in {"direct", "value"}]
     own = snapshot["own"]
-    comparison_sales = own["sales"] + sum(p["sales"] for p in peers)
+    comparison_sales = (own.get("sales") or 0) + sum((p.get("sales") or 0) for p in peers)
     peer_changes = [p["sales_change"] for p in peers if p["sales_change"] is not None]
-    keyword_history = LITET_KEYWORD_HISTORY if brand == "Litet" else []
+    keyword_history = helium["history"].get(brand, [])
     strategic_gaps = sorted(
         [k for k in keyword_history if k["aug_volume"] and (k["aug_rank"] is None or k["aug_rank"] > 10)],
         key=lambda k: k["aug_volume"], reverse=True)[:6]
-    return {**snapshot, "captured_at": CAPTURED_AT,
-            "direct_price_median": median([p["price"] for p in direct]),
-            "competitor_sales_median": median([p["sales"] for p in peers]),
-            "competitor_keyword_median": median([p["top10_keywords"] for p in peers]),
-            "review_gap": median([p["reviews"] for p in peers]) - own["reviews"],
-            "comparison_share": own["sales"] / comparison_sales if comparison_sales else None,
+    captured_date = date.fromisoformat(helium["captured_at"][:10])
+    return {**snapshot, "captured_at": helium["captured_at"], "source": helium["source"],
+            "is_stale": (date.today() - captured_date).days > 2,
+            "direct_price_median": median([p["price"] for p in direct if p.get("price") is not None]) if any(p.get("price") is not None for p in direct) else None,
+            "competitor_sales_median": median([p["sales"] for p in peers if p.get("sales") is not None]) if any(p.get("sales") is not None for p in peers) else None,
+            "competitor_keyword_median": median([p["top10_keywords"] for p in peers if p.get("top10_keywords") is not None]) if any(p.get("top10_keywords") is not None for p in peers) else None,
+            "review_gap": (median([p["reviews"] for p in peers if p.get("reviews") is not None]) - own["reviews"] if own.get("reviews") is not None and any(p.get("reviews") is not None for p in peers) else None),
+            "comparison_share": own["sales"] / comparison_sales if own.get("sales") is not None and comparison_sales else None,
             "peer_median_change": median(peer_changes) if peer_changes else None,
             "keyword_history": keyword_history, "strategic_gaps": strategic_gaps}
 
@@ -678,7 +747,7 @@ def ppc_decisions(period_start, period_end, brand):
         rows=conn.execute(f"""SELECT campaign_name,target,match_type,search_term,SUM(impressions) impressions,SUM(clicks) clicks,SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
           CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos,CASE WHEN SUM(clicks)>0 THEN SUM(spend)/SUM(clicks) END cpc,CASE WHEN SUM(clicks)>0 THEN SUM(ad_orders)/SUM(clicks) END cvr
           FROM ppc_fact_clean WHERE report_date BETWEEN ? AND ? AND {where} GROUP BY campaign_name,target,match_type,search_term HAVING SUM(spend)>0 ORDER BY SUM(spend) DESC LIMIT 30""",[period_start,period_end,*params]).fetchall()
-    rank_lookup = {k["phrase"].lower(): k for k in (LITET_KEYWORD_HISTORY if brand == "Litet" else [])}
+    rank_lookup = {k["phrase"].lower(): k for k in _keyword_history(brand)}
     data=[]
     for raw in rows:
         row=dict(raw)
@@ -729,7 +798,7 @@ def keyword_playbook(period_start, period_end, brand):
                  COUNT(DISTINCT report_date) loaded_days
           FROM ppc_fact_clean WHERE brand=?""",(brand,)).fetchone()
     target_lookup={(r["campaign_name"],r["target"],r["match_type"]):dict(r) for r in target_rows}
-    rank_lookup={k["phrase"].lower():k for k in (LITET_KEYWORD_HISTORY if brand=="Litet" else [])}
+    rank_lookup={k["phrase"].lower():k for k in _keyword_history(brand)}
     target_plan=[]
     for raw in target_rows:
         target=dict(raw)
@@ -890,8 +959,8 @@ def ppc_organic_trend(brand):
 
 
 def keyword_opportunities(period_start, period_end, brand):
-    source=(HAS10_KEYWORD_OPPORTUNITIES if brand=="Has10" else
-            LITET_PARENT_KEYWORD_OPPORTUNITIES if brand=="Litet" else [])
+    helium = helium_data()
+    source=helium["keywords"].get(brand, [])
     if not source: return []
     phrases=[row["phrase"] for row in source]
     marks=",".join("?" for _ in phrases)
@@ -916,7 +985,7 @@ def keyword_opportunities(period_start, period_end, brand):
     output=[]
     for source_row in source:
         item=dict(source_row); evidence=by_phrase.get(item["phrase"],[])
-        item["metrics_captured_at"]=(HAS10_KEYWORDS_CAPTURED_AT if brand=="Has10" else LITET_KEYWORDS_CAPTURED_AT)
+        item["metrics_captured_at"]=helium["keyword_dates"].get(brand, helium["captured_at"])
         item["clicks"]=sum(r["clicks"] or 0 for r in evidence)
         item["orders"]=sum(r["orders"] or 0 for r in evidence)
         item["spend"]=sum(r["spend"] or 0 for r in evidence)

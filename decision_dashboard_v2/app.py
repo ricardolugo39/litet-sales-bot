@@ -4,9 +4,14 @@ import gzip
 import hmac
 import shutil
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from flask import Flask, after_this_request, redirect, render_template, request, send_file, url_for
+
+if __package__:
+    from .helium_store import save_snapshot
+else:
+    from helium_store import save_snapshot
 
 if __package__:
     from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
@@ -47,20 +52,29 @@ def _validate_database(path):
         raise ValueError(f"Database is missing required tables: {', '.join(missing)}")
 
 
-def _preserve_interventions(candidate, current):
-    """Carry the Railway-owned decision log into a newly uploaded snapshot."""
+def _preserve_railway_tables(candidate, current):
+    """Carry Railway-owned state into a newly uploaded analytics snapshot."""
     if not current.exists():
         return
     with sqlite3.connect(candidate) as conn:
         conn.execute("ATTACH DATABASE ? AS current_db", (str(current),))
-        exists = conn.execute(
-            "SELECT 1 FROM current_db.sqlite_master WHERE type='table' AND name='interventions'"
-        ).fetchone()
-        if exists:
-            # Qualify `main`: an unqualified DROP can resolve to the attached DB
-            # when the uploaded snapshot has no intervention table yet.
-            conn.execute("DROP TABLE IF EXISTS main.interventions")
-            conn.execute("CREATE TABLE main.interventions AS SELECT * FROM current_db.interventions")
+        for table in ("interventions", "helium_snapshots"):
+            schema = conn.execute(
+                "SELECT sql FROM current_db.sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if schema:
+                # Table names are fixed above; never interpolate request data.
+                conn.execute(f"DROP TABLE IF EXISTS main.{table}")
+                conn.execute(schema[0])
+                conn.execute(f"INSERT INTO main.{table} SELECT * FROM current_db.{table}")
+                indexes = conn.execute(
+                    "SELECT sql FROM current_db.sqlite_master "
+                    "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+                    (table,),
+                ).fetchall()
+                for index in indexes:
+                    conn.execute(index[0])
         conn.commit()
 
 @app.get("/health")
@@ -78,9 +92,27 @@ def health():
     try:
         with sqlite3.connect(db_path) as conn:
             conn.execute("SELECT 1 FROM business_traffic LIMIT 1").fetchone()
+            try:
+                row = conn.execute(
+                    "SELECT captured_at FROM helium_snapshots "
+                    "ORDER BY captured_at DESC, id DESC LIMIT 1"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = None
     except (OSError, sqlite3.Error) as exc:
         return {"status": "error", "reason": str(exc)}, 503
-    return {"status": "ok"}
+    helium = {"status": "awaiting_first_snapshot"}
+    if row:
+        captured = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - captured).total_seconds() / 3600
+        helium = {
+            "status": "stale" if age_hours > 48 else "ok",
+            "captured_at": row[0],
+            "age_hours": round(age_hours, 1),
+        }
+    return {"status": "ok", "helium10": helium}
 
 
 @app.get("/admin")
@@ -103,11 +135,29 @@ def upload_database():
         with gzip.GzipFile(fileobj=request.stream, mode="rb") as source, candidate.open("wb") as target:
             shutil.copyfileobj(source, target)
         _validate_database(candidate)
-        _preserve_interventions(candidate, db_path)
+        _preserve_railway_tables(candidate, db_path)
         os.replace(candidate, db_path)
         return {"status": "ok", "bytes": db_path.stat().st_size}
     except (OSError, sqlite3.Error, ValueError) as exc:
         candidate.unlink(missing_ok=True)
+        return {"status": "error", "reason": str(exc)}, 400
+
+
+@app.put("/admin/helium-snapshot")
+def upload_helium_snapshot():
+    """Atomically publish one complete Litet + Has10 Helium 10 snapshot."""
+    if not _admin_authorized():
+        return {"status": "error", "reason": "unauthorized"}, 401
+    try:
+        payload = request.get_json(force=False)
+        snapshot_id = save_snapshot(os.environ["LITET_DB_PATH"], payload)
+        return {
+            "status": "ok",
+            "snapshot_id": snapshot_id,
+            "captured_at": payload["captured_at"],
+            "brands": sorted(payload["brands"]),
+        }
+    except (KeyError, OSError, sqlite3.Error, TypeError, ValueError) as exc:
         return {"status": "error", "reason": str(exc)}, 400
 
 
