@@ -694,9 +694,11 @@ def market_context(brand):
     comparison_sales = (own.get("sales") or 0) + sum((p.get("sales") or 0) for p in peers)
     peer_changes = [p["sales_change"] for p in peers if p["sales_change"] is not None]
     keyword_history = _keyword_history(brand)
+    current_keywords = helium["keywords"].get(brand, [])
     strategic_gaps = sorted(
-        [k for k in keyword_history if k["aug_volume"] and (k["aug_rank"] is None or k["aug_rank"] > 10)],
-        key=lambda k: k["aug_volume"], reverse=True)[:6]
+        [k for k in current_keywords
+         if k.get("search_volume") and (k.get("rank") is None or k["rank"] > 10)],
+        key=lambda k: k["search_volume"], reverse=True)[:6]
     captured_date = date.fromisoformat(helium["captured_at"][:10])
     return {**snapshot, "captured_at": helium["captured_at"], "source": helium["source"],
             "is_stale": (date.today() - captured_date).days > 2,

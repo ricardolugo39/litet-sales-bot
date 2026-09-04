@@ -165,6 +165,7 @@ def test_market_context_uses_fresh_keywords_and_optional_sales_benchmark(sync_cl
     context = market_context("Litet")
     assert context["competitor_sales_median"] == 164
     assert context["strategic_gaps"][0]["phrase"] == "cycling socks"
+    assert context["strategic_gaps"][0]["rank"] == 12
 
 
 def test_health_allows_initial_database_upload(tmp_path, monkeypatch):
