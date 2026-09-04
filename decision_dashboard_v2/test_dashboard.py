@@ -1,6 +1,7 @@
 import unittest
 import os
 import tempfile
+from unittest.mock import patch
 
 try:
     from .app import app
@@ -223,6 +224,23 @@ class DashboardTest(unittest.TestCase):
             response = self.client.get(path + query)
             self.assertEqual(response.status_code, 200, path)
             self.assertIn(marker, response.data, path)
+
+    def test_products_handles_missing_helium_sales_changes(self):
+        market = {
+            "own": {"sales": None, "sales_change": None, "reviews": 97,
+                    "price": 14.99, "top10_keywords": 4},
+            "competitors": [], "competitor_sales_median": None,
+            "competitor_keyword_median": None, "comparison_share": None,
+            "review_gap": None, "peer_median_change": None,
+            "direct_price_median": None, "pack_benchmarks": [],
+            "strategic_gaps": [], "captured_at": "2026-09-04T23:12:18Z",
+        }
+        with patch("decision_dashboard_v2.app.market_context", return_value=market):
+            response = self.client.get(
+                "/products?brand=Litet&period=2026-08-01%7C2026-08-27"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Peer median recent change", response.data)
 
     def test_global_qtd_and_ytd_filters_render_across_tabs(self):
         for period in ("2026-07-01%7C2026-08-16", "2026-01-01%7C2026-08-16"):
