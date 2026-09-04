@@ -22,6 +22,11 @@ only values returned by MCP. Never copy spreadsheet metrics into a snapshot.
    `monthly_revenue` to `revenue`, `review_count` to `reviews`,
    `reviews_rating` to `rating`, and retain price, LQS, top-10 keyword metrics,
    and sales change under their snapshot contract names.
+   Also run the competitor benchmark report. When Listing Analyzer omits the
+   main parent sales/revenue estimate, use the report's `main_asin_sales_data`.
+   Store `searched_products_avg` as the brand's optional `sales_benchmark` so
+   the dashboard can still show the comparison-set benchmark without inventing
+   missing per-competitor values.
 5. Run `analyze_keywords` for every configured phrase. Run multi-ASIN keyword
    comparison for organic `rank` and competitive `peer_rank`. Match by
    normalized phrase, never response order.

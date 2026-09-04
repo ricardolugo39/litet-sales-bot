@@ -59,6 +59,7 @@ def helium_data():
             "own_parent": brand_data["parent_asin"],
             "own": brand_data["own"],
             "competitors": brand_data["competitors"],
+            "sales_benchmark": brand_data.get("sales_benchmark"),
             "pack_benchmarks": brand_data.get(
                 "pack_benchmarks", fallback.get("pack_benchmarks", [])
             ),
@@ -692,7 +693,7 @@ def market_context(brand):
     own = snapshot["own"]
     comparison_sales = (own.get("sales") or 0) + sum((p.get("sales") or 0) for p in peers)
     peer_changes = [p["sales_change"] for p in peers if p["sales_change"] is not None]
-    keyword_history = helium["history"].get(brand, [])
+    keyword_history = _keyword_history(brand)
     strategic_gaps = sorted(
         [k for k in keyword_history if k["aug_volume"] and (k["aug_rank"] is None or k["aug_rank"] > 10)],
         key=lambda k: k["aug_volume"], reverse=True)[:6]
@@ -700,7 +701,9 @@ def market_context(brand):
     return {**snapshot, "captured_at": helium["captured_at"], "source": helium["source"],
             "is_stale": (date.today() - captured_date).days > 2,
             "direct_price_median": median([p["price"] for p in direct if p.get("price") is not None]) if any(p.get("price") is not None for p in direct) else None,
-            "competitor_sales_median": median([p["sales"] for p in peers if p.get("sales") is not None]) if any(p.get("sales") is not None for p in peers) else None,
+            "competitor_sales_median": (median([p["sales"] for p in peers if p.get("sales") is not None])
+                                        if any(p.get("sales") is not None for p in peers)
+                                        else (snapshot.get("sales_benchmark") or {}).get("monthly_sales")),
             "competitor_keyword_median": median([p["top10_keywords"] for p in peers if p.get("top10_keywords") is not None]) if any(p.get("top10_keywords") is not None for p in peers) else None,
             "review_gap": (median([p["reviews"] for p in peers if p.get("reviews") is not None]) - own["reviews"] if own.get("reviews") is not None and any(p.get("reviews") is not None for p in peers) else None),
             "comparison_share": own["sales"] / comparison_sales if own.get("sales") is not None and comparison_sales else None,

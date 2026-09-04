@@ -149,6 +149,24 @@ def test_market_context_reads_latest_database_snapshot(sync_client):
     assert context["source"] == "helium10_mcp"
 
 
+def test_market_context_uses_fresh_keywords_and_optional_sales_benchmark(sync_client):
+    client, _ = sync_client
+    payload = helium_payload()
+    litet = payload["brands"]["Litet"]
+    litet["competitors"][0]["sales"] = None
+    litet["sales_benchmark"] = {"monthly_sales": 164}
+    response = client.put(
+        "/admin/helium-snapshot",
+        json=payload,
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 200
+    from decision_dashboard_v2.analytics import market_context
+    context = market_context("Litet")
+    assert context["competitor_sales_median"] == 164
+    assert context["strategic_gaps"][0]["phrase"] == "cycling socks"
+
+
 def test_health_allows_initial_database_upload(tmp_path, monkeypatch):
     monkeypatch.setenv("LITET_DB_PATH", str(tmp_path / "not-created-yet.db"))
     from decision_dashboard_v2.app import app
