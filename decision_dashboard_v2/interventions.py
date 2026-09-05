@@ -1,6 +1,8 @@
 """Local decision log. Recording a case never changes Amazon."""
 import os
+import json
 import sqlite3
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -17,6 +19,17 @@ def connect():
       old_value REAL, new_value REAL, period_start TEXT, period_end TEXT,
       objective TEXT, required_lift REAL, review_date TEXT, status TEXT DEFAULT 'planned'
     )""")
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(interventions)")}
+    additions = {
+        "campaign_name": "TEXT", "entity_type": "TEXT", "entity_name": "TEXT",
+        "action_type": "TEXT", "baseline_json": "TEXT", "approved_at": "TEXT",
+        "executed_at": "TEXT", "review_14_date": "TEXT", "outcome": "TEXT",
+        "external_status": "TEXT",
+    }
+    for column, kind in additions.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE interventions ADD COLUMN {column} {kind}")
+    conn.commit()
     return conn
 
 
@@ -32,3 +45,49 @@ def record_pricing_case(data):
 def recent_interventions(limit=20):
     with connect() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM interventions ORDER BY created_at DESC,id DESC LIMIT ?",(limit,))]
+
+
+def record_action_proposal(data):
+    """Record a reviewable action; this never changes Amazon Ads."""
+    with connect() as conn:
+        duplicate = conn.execute("""SELECT id FROM interventions
+          WHERE brand=? AND campaign_name=? AND entity_type=? AND entity_name=?
+            AND action_type=? AND status IN ('proposed','approved','executed','monitoring')
+          ORDER BY id DESC LIMIT 1""",(
+            data["brand"], data["campaign_name"], data["entity_type"],
+            data["entity_name"], data["action_type"],
+        )).fetchone()
+        if duplicate:
+            return duplicate[0], False
+        today=date.today()
+        cur=conn.execute("""INSERT INTO interventions
+          (brand,asin,intervention_type,old_value,new_value,period_start,period_end,
+           objective,review_date,review_14_date,status,campaign_name,entity_type,
+           entity_name,action_type,baseline_json,external_status)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+            data["brand"], data.get("asin") or "—", "ppc_action",
+            data.get("old_value"), data.get("new_value"), data["period_start"],
+            data["period_end"], data["objective"],
+            (today+timedelta(days=7)).isoformat(),
+            (today+timedelta(days=14)).isoformat(), "proposed",
+            data["campaign_name"], data["entity_type"], data["entity_name"],
+            data["action_type"], json.dumps(data.get("baseline",{}),sort_keys=True),
+            "awaiting_mcp_approval",
+        ))
+        return cur.lastrowid, True
+
+
+def update_intervention_status(intervention_id, status):
+    allowed={"approved","executed","monitoring","dismissed","reverted","completed"}
+    if status not in allowed:
+        raise ValueError("Invalid intervention status")
+    now=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    updates={"status":status}
+    if status=="approved": updates.update(approved_at=now,external_status="ready_for_mcp")
+    elif status=="executed": updates.update(executed_at=now,external_status="pending_confirmation")
+    elif status=="monitoring": updates.update(external_status="confirmed")
+    elif status in {"dismissed","reverted","completed"}: updates.update(outcome=status)
+    assignments=", ".join(f"{column}=?" for column in updates)
+    with connect() as conn:
+        conn.execute(f"UPDATE interventions SET {assignments} WHERE id=?",
+                     (*updates.values(),intervention_id))

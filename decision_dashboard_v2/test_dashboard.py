@@ -313,8 +313,30 @@ class DashboardTest(unittest.TestCase):
             "new_value":"13.99", "period_start":"2026-08-01", "period_end":"2026-08-16",
             "required_lift":"0.25"}, follow_redirects=True)
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Intervention log", response.data)
+        self.assertIn(b"Action review queue", response.data)
         self.assertIn(b"B0DSCFMCQD", response.data)
+
+    def test_ppc_proposal_is_queued_once_and_can_be_approved(self):
+        payload={"brand":"Litet","campaign_name":"LITET discovery",
+                 "entity_type":"target","entity_name":"men cycling socks",
+                 "action_type":"reduce_bid_15pct","old_value":"2.02",
+                 "new_value":"1.72","period_start":"2026-09-01",
+                 "period_end":"2026-09-04","objective":"Reduce waste",
+                 "spend":"97.10","clicks":"48","orders":"3","acos":"1.388"}
+        for _ in range(2):
+            response=self.client.post("/decisions/proposals",data=payload,follow_redirects=True)
+            self.assertEqual(response.status_code,200)
+        from decision_dashboard_v2.interventions import connect
+        with connect() as conn:
+            rows=conn.execute("SELECT * FROM interventions WHERE entity_name=?",
+                              ("men cycling socks",)).fetchall()
+        self.assertEqual(len(rows),1)
+        intervention_id=rows[0]["id"]
+        response=self.client.post(f"/decisions/interventions/{intervention_id}/status",
+                                  data={"brand":"Litet","period":"2026-09-01|2026-09-04",
+                                        "status":"approved"},follow_redirects=True)
+        self.assertEqual(response.status_code,200)
+        self.assertIn(b"ready_for_mcp",response.data)
 
     def test_pricing_case_uses_trailing_settled_history(self):
         response = self.client.get(

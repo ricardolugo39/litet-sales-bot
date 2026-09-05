@@ -1184,7 +1184,15 @@ def executive_actions(period_start, period_end, brand, ranked_actions):
     avg_prior=prior_full["ordered_sales"]/date.fromisoformat(prior_full["period_end"]).day
     steps=[
       {"action":"ACT NOW — Stop PPC budget increases and isolate inefficient traffic.",
-       "why":f"Current MTD sales are ${current['ordered_sales']:,.0f} against ${current['ad_spend']:,.0f} of ad spend: {tacos:.0%} TaCoS and {total_acos:.0%} aggregate ACoS.{ppc_detail}"},
+       "why":f"Current MTD sales are ${current['ordered_sales']:,.0f} against ${current['ad_spend']:,.0f} of ad spend: {tacos:.0%} TaCoS and {total_acos:.0%} aggregate ACoS.{ppc_detail}",
+       "proposal":({"campaign_name":bad["campaign_name"],"entity_type":"target",
+                    "entity_name":bad["target"],"action_type":"reduce_bid_15pct",
+                    "old_value":bad["cpc"],"new_value":bad["cpc"]*.85,
+                    "spend":bad["spend"],"clicks":bad["clicks"],
+                    "orders":bad["orders"],"acos":bad["acos"],
+                    "period_start":current_start,"period_end":current_end,
+                    "objective":"Reduce inefficient target-level spend while protecting total sales."}
+                   if bad and bad.get("cpc") else None)},
       {"action":"WATCH — Do not change price from four days of demand.",
        "why":f"Sales are {change:+.0%} versus the same days last month, but the ${avg_current:,.0f} current daily pace is {avg_current/avg_prior-1:+.0%} versus last month's full-period average. Reassess after 7 complete days."},
     ]

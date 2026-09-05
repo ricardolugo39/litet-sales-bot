@@ -17,12 +17,14 @@ if __package__:
     from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                             market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
                             ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
-    from .interventions import recent_interventions, record_pricing_case
+    from .interventions import (recent_interventions, record_action_proposal,
+                                record_pricing_case, update_intervention_status)
 else:  # Supports `python app.py` from this directory.
     from analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                            market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
                            ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
-    from interventions import recent_interventions, record_pricing_case
+    from interventions import (recent_interventions, record_action_proposal,
+                               record_pricing_case, update_intervention_status)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
@@ -291,6 +293,24 @@ def approve_pricing():
       "objective":"Validate incremental contribution; no Amazon price change is executed by this app.",
       "required_lift":float(request.form["required_lift"]),"review_date":(date.today()+timedelta(days=7)).isoformat()})
     return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}"))
+
+@app.post("/decisions/proposals")
+def create_proposal():
+    old_value=float(request.form["old_value"])
+    new_value=float(request.form["new_value"])
+    record_action_proposal({"brand":request.form["brand"],"campaign_name":request.form["campaign_name"],
+      "entity_type":request.form["entity_type"],"entity_name":request.form["entity_name"],
+      "action_type":request.form["action_type"],"old_value":old_value,"new_value":new_value,
+      "period_start":request.form["period_start"],"period_end":request.form["period_end"],
+      "objective":request.form["objective"],"baseline":{"spend":float(request.form["spend"]),
+      "clicks":float(request.form["clicks"]),"orders":float(request.form["orders"]),
+      "acos":float(request.form["acos"])}})
+    return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}"))
+
+@app.post("/decisions/interventions/<int:intervention_id>/status")
+def intervention_status(intervention_id):
+    update_intervention_status(intervention_id,request.form["status"])
+    return redirect(url_for("decisions",brand=request.form.get("brand","Litet"),period=request.form.get("period","")))
 
 if __name__=="__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5051")), debug=False)
