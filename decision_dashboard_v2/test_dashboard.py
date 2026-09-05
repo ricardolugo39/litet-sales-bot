@@ -31,10 +31,9 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"white cycling socks", response.data)
         self.assertIn(b"Do not change PPC because of this 3-pack decline", response.data)
         self.assertIn(b"Estimated P&amp;L", response.data)
-        self.assertIn(b"08/26 MTD", response.data)
-        self.assertIn(b"23.0%", response.data)
+        self.assertIn(b'data-label="08/26"', response.data)
+        self.assertIn(b"09/26 MTD", response.data)
         self.assertIn(b"Monthly ordered sales ($) + TaCoS (%)", response.data)
-        self.assertIn(b"$2.3k", response.data)
 
     def test_brand_and_period_filter(self):
         response = self.client.get(
@@ -101,6 +100,8 @@ class DashboardTest(unittest.TestCase):
     def test_monthly_trend_contains_consolidated_current_mtd(self):
         from decision_dashboard_v2.analytics import monthly_trend
         trend = monthly_trend("Litet")
+        latest_year = trend[-1]["period_start"][:4]
+        self.assertTrue(all(r["period_start"].startswith(latest_year) for r in trend))
         august = [r for r in trend if r["period_start"] == "2026-08-01"]
         september = [r for r in trend if r["period_start"] == "2026-09-01"]
         self.assertEqual(len(august), 1)

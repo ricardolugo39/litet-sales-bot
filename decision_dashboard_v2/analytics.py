@@ -348,6 +348,7 @@ def monthly_trend(brand):
                          - COALESCE(CAST(o."item-promotion-discount" AS REAL),0)) ordered_sales
               FROM orders o JOIN dim_product p ON p.asin=o.asin, latest
               WHERE date(substr(o."purchase-date",1,10)) <= latest.max_date
+                AND substr(o."purchase-date",1,4) = substr(latest.max_date,1,4)
                 AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
                 AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')
                 AND {order_where}
@@ -355,7 +356,9 @@ def monthly_trend(brand):
             ), ads AS (
               SELECT substr(report_date,1,7) month, SUM(spend) ad_spend
               FROM ppc_fact_clean, latest
-              WHERE date(report_date) <= latest.max_date AND {ppc_where}
+              WHERE date(report_date) <= latest.max_date
+                AND substr(report_date,1,4) = substr(latest.max_date,1,4)
+                AND {ppc_where}
               GROUP BY substr(report_date,1,7)
             )
             SELECT s.month || '-01' period_start,
