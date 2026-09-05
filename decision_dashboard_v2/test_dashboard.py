@@ -42,8 +42,16 @@ class DashboardTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Current operations \xc2\xb7 2026-09-01\xe2\x80\x932026-09-04", response.data)
-        self.assertIn(b"Latest settled period \xc2\xb7 2026-08-01\xe2\x80\x932026-08-27", response.data)
+        self.assertIn(b"Latest settled period \xc2\xb7 2026-09-01\xe2\x80\x932026-09-04", response.data)
         self.assertNotIn(b"Net sales</span><b>$0</b>", response.data)
+
+    def test_old_august_cutoff_advances_to_completed_month(self):
+        response = self.client.get(
+            "/?brand=Litet&period=2026-08-01%7C2026-08-27"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Litet \xc2\xb7 2026-08-01\xe2\x80\x932026-08-31", response.data)
+        self.assertIn(b"Latest settled period \xc2\xb7 2026-08-01\xe2\x80\x932026-08-31", response.data)
 
     def test_brand_and_period_filter(self):
         response = self.client.get(

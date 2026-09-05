@@ -214,6 +214,17 @@ def selection():
         if date.fromisoformat(start)>date.fromisoformat(end): raise ValueError
     except (TypeError, ValueError):
         aligned=next((p for p in choices if p.get("group") == "Monthly periods" and p["has_economics"]),choices[0]); start,end=aligned["period_start"],aligned["period_end"]
+    else:
+        exact=next((p for p in choices
+                    if p["period_start"]==start and p["period_end"]==end),None)
+        if exact is None:
+            # Old bookmarked MTD cutoffs should advance to the consolidated
+            # calendar-month choice after newer slices complete that month.
+            month_choice=next((p for p in choices
+                               if p.get("group")=="Monthly periods"
+                               and p["period_start"][:7]==start[:7]),None)
+            if month_choice:
+                start,end=month_choice["period_start"],month_choice["period_end"]
     brand=request.args.get("brand","Litet")
     if brand not in {"All","Litet","Has10"}: brand="Litet"
     return choices,start,end,brand
