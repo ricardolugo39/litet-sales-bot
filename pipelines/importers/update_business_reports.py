@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .period_overlap import retire_replaced_cross_month_reports
+
 
 CLOUD_BASE = Path(
     os.getenv(
@@ -289,11 +291,16 @@ def import_file(file_path, conn, move_after=True):
             (digest, file_path.name, period_start, period_end, period_type, len(df), imported_at),
         )
         df.to_sql("business_traffic", conn, if_exists="append", index=False)
+        retired = retire_replaced_cross_month_reports(
+            conn, "business_report_imports", "business_traffic"
+        )
 
     print(
         f"Imported {len(df):,} rows for {period_start} through {period_end} "
         f"({period_type})"
     )
+    for source in retired:
+        print(f"Retired replaced cross-month business report: {source}")
     if move_after:
         target = destination_path(file_path, PROCESSED_FOLDER, "processed")
         shutil.move(file_path, target)

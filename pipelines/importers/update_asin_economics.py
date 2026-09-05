@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .period_overlap import retire_replaced_cross_month_reports
+
 
 CLOUD_BASE = Path(
     os.getenv(
@@ -369,6 +371,9 @@ def import_file(file_path, conn, move_after=True):
             ),
         )
         df.to_sql("asin_economics", conn, if_exists="append", index=False)
+        retired = retire_replaced_cross_month_reports(
+            conn, "economics_report_imports", "asin_economics"
+        )
 
     matched, unmatched = catalog_coverage(conn, df["asin"].tolist())
     print(
@@ -376,6 +381,8 @@ def import_file(file_path, conn, move_after=True):
         f"({package['period_type']}); catalog matches: {matched}/{len(df)}; "
         f"net proceeds: ${package['reported_net_proceeds']:,.2f}"
     )
+    for source in retired:
+        print(f"Retired replaced cross-month economics report: {source}")
     if unmatched:
         print(f"Warning: unmatched ASINs: {unmatched}")
     if move_after:
