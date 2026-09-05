@@ -29,6 +29,7 @@ def connect():
     for column, kind in additions.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE interventions ADD COLUMN {column} {kind}")
+    conn.execute("UPDATE interventions SET created_at=CURRENT_TIMESTAMP WHERE created_at IS NULL")
     conn.commit()
     return conn
 
@@ -36,8 +37,8 @@ def connect():
 def record_pricing_case(data):
     with connect() as conn:
         cur = conn.execute("""INSERT INTO interventions
-          (brand,asin,intervention_type,old_value,new_value,period_start,period_end,objective,required_lift,review_date)
-          VALUES (?,?, 'price_test', ?,?,?,?,?,?,?)""",
+          (created_at,brand,asin,intervention_type,old_value,new_value,period_start,period_end,objective,required_lift,review_date)
+          VALUES (CURRENT_TIMESTAMP,?,?, 'price_test', ?,?,?,?,?,?,?)""",
           (data["brand"],data["asin"],data["old_value"],data["new_value"],data["period_start"],data["period_end"],data["objective"],data["required_lift"],data["review_date"]))
         return cur.lastrowid
 
@@ -61,10 +62,10 @@ def record_action_proposal(data):
             return duplicate[0], False
         today=date.today()
         cur=conn.execute("""INSERT INTO interventions
-          (brand,asin,intervention_type,old_value,new_value,period_start,period_end,
+          (created_at,brand,asin,intervention_type,old_value,new_value,period_start,period_end,
            objective,review_date,review_14_date,status,campaign_name,entity_type,
            entity_name,action_type,baseline_json,external_status)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+          VALUES (CURRENT_TIMESTAMP,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
             data["brand"], data.get("asin") or "—", "ppc_action",
             data.get("old_value"), data.get("new_value"), data["period_start"],
             data["period_end"], data["objective"],

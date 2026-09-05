@@ -331,6 +331,7 @@ class DashboardTest(unittest.TestCase):
             rows=conn.execute("SELECT * FROM interventions WHERE entity_name=?",
                               ("men cycling socks",)).fetchall()
         self.assertEqual(len(rows),1)
+        self.assertIsNotNone(rows[0]["created_at"])
         intervention_id=rows[0]["id"]
         response=self.client.post(f"/decisions/interventions/{intervention_id}/status",
                                   data={"brand":"Litet","period":"2026-09-01|2026-09-04",
