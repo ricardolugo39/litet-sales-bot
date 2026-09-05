@@ -120,6 +120,12 @@ def ppc_periods():
     latest = date.fromisoformat(max(row["period_end"] for row in base))
     quarter_month = ((latest.month - 1) // 3) * 3 + 1
     current_start = latest.replace(day=1).isoformat()
+    current_has_economics = int(any(
+        row.get("has_economics")
+        and row["period_start"] >= current_start
+        and row["period_end"] <= latest.isoformat()
+        for row in base
+    ))
     presets = [
         {"period_start": latest.replace(month=quarter_month, day=1).isoformat(),
          "period_end": latest.isoformat(), "period_type": "qtd", "has_economics": 1,
@@ -128,22 +134,34 @@ def ppc_periods():
          "period_end": latest.isoformat(), "period_type": "ytd", "has_economics": 1,
          "label": f"YTD · {latest.year}", "group":"Quick ranges"},
     ]
-    choices=[]
+    monthly = {}
     for row in base:
         item=dict(row)
         start=date.fromisoformat(item["period_start"]); end=date.fromisoformat(item["period_end"])
-        # Uploaded weekly/custom slices from the current month are one reporting
-        # period in the UI. Keeping every slice created duplicate-looking filters
-        # and made the latest selection exclude earlier days in the same month.
-        if start.year == latest.year and start.month == latest.month:
+        # A report that crosses a month boundary cannot represent either calendar
+        # month by itself. The synthetic current-MTD choice below covers the latest
+        # month, while completed/partial single-month uploads supply history.
+        if (start.year, start.month) != (end.year, end.month):
             continue
-        item["label"]=(f"{calendar.month_name[start.month]} {start.year}"
-                       + (f" MTD · through {end.day}" if end.day < calendar.monthrange(end.year,end.month)[1] else ""))
+        if (end.year, end.month) == (latest.year, latest.month):
+            continue
+        key = (start.year, start.month)
+        existing = monthly.get(key)
+        if existing is None or end > date.fromisoformat(existing["period_end"]):
+            monthly[key] = item
+
+    choices=[]
+    for (year, month), item in sorted(monthly.items(), reverse=True):
+        end=date.fromisoformat(item["period_end"])
+        item["period_start"] = date(year, month, 1).isoformat()
+        # Only the latest calendar month is MTD. Once a newer month is loaded,
+        # prior months become one closed, month-level choice in the filter.
+        item["label"] = f"{calendar.month_name[month]} {year}"
         item["group"]="Monthly periods"
         choices.append(item)
     choices.insert(0, {
         "period_start": current_start, "period_end": latest.isoformat(),
-        "period_type": "mtd", "has_economics": 1,
+        "period_type": "mtd", "has_economics": current_has_economics,
         "label": f"{calendar.month_name[latest.month]} {latest.year} MTD · through {latest.day}",
         "group": "Monthly periods",
     })

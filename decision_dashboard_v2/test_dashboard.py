@@ -71,11 +71,32 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"orange cleat covers", response.data)
 
     def test_current_month_filter_is_consolidated(self):
+        from decision_dashboard_v2.analytics import periods, ppc_periods
+        latest = max(p["period_end"] for p in periods())
+        latest_month = latest[:7]
+        current = [p for p in ppc_periods()
+                   if p["group"] == "Monthly periods"
+                   and p["period_start"].startswith(latest_month)]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0]["period_start"], f"{latest_month}-01")
+        self.assertEqual(current[0]["period_end"], latest)
+
+    def test_prior_month_filter_keeps_only_latest_cutoff(self):
         from decision_dashboard_v2.analytics import ppc_periods
-        august = [p for p in ppc_periods() if p["period_start"].startswith("2026-08")]
+        imported = [
+            {"period_start": "2026-08-01", "period_end": f"2026-08-{day:02d}",
+             "period_type": "custom", "has_economics": 1}
+            for day in (4, 16, 23, 27)
+        ] + [{
+            "period_start": "2026-08-28", "period_end": "2026-09-04",
+            "period_type": "custom", "has_economics": 1,
+        }]
+        with patch("decision_dashboard_v2.analytics.periods", return_value=imported):
+            choices = ppc_periods()
+        august = [p for p in choices if p["period_start"].startswith("2026-08")]
         self.assertEqual(len(august), 1)
-        self.assertEqual(august[0]["period_start"], "2026-08-01")
-        self.assertEqual(august[0]["period_end"], "2026-08-23")
+        self.assertEqual(august[0]["period_end"], "2026-08-27")
+        self.assertEqual(august[0]["label"], "August 2026")
 
     def test_monthly_trend_contains_consolidated_current_mtd(self):
         from decision_dashboard_v2.analytics import monthly_trend
