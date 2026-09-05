@@ -812,17 +812,38 @@ def keyword_playbook(period_start, period_end, brand):
           HAVING SUM(clicks)>0
           ORDER BY SUM(ad_orders) DESC,SUM(spend) DESC""",
           (brand,period_start,period_end)).fetchall()
-        target_rows=conn.execute("""SELECT campaign_name,target,match_type,
+        target_rows=conn.execute("""SELECT campaign_name,ad_group_name,target,match_type,
                  SUM(clicks) clicks,SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
                  CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos
           FROM ppc_fact_clean
           WHERE brand=? AND report_date BETWEEN ? AND ?
-          GROUP BY campaign_name,target,match_type""",
+          GROUP BY campaign_name,ad_group_name,target,match_type""",
           (brand,period_start,period_end)).fetchall()
+        history_rows=conn.execute("""SELECT campaign_name,ad_group_name,target,match_type,
+                 substr(report_date,1,7) month,SUM(clicks) clicks,SUM(spend) spend,
+                 SUM(ad_sales) ad_sales,SUM(ad_orders) orders
+          FROM ppc_fact_clean WHERE brand=? AND report_date<=?
+          GROUP BY campaign_name,ad_group_name,target,match_type,substr(report_date,1,7)
+          ORDER BY month DESC""",(brand,period_end)).fetchall()
+        bid_table=conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ppc_bid_change'").fetchone()
+        bid_rows=(conn.execute("""SELECT campaign_name,ad_group_name,target_value,suggested_bid,actual_bid,
+                 amazon_suggested_low,amazon_suggested_high,change_date
+          FROM ppc_bid_change WHERE brand=? ORDER BY change_date DESC,bid_change_id DESC""",(brand,)).fetchall()
+                  if bid_table else [])
         freshness=conn.execute("""SELECT MIN(report_date) first_loaded_date,MAX(report_date) last_loaded_date,
                  COUNT(DISTINCT report_date) loaded_days
           FROM ppc_fact_clean WHERE brand=?""",(brand,)).fetchone()
     target_lookup={(r["campaign_name"],r["target"],r["match_type"]):dict(r) for r in target_rows}
+    history_lookup={}
+    for raw in history_rows:
+        row=dict(raw); key=(row["campaign_name"],row["ad_group_name"],row["target"],row["match_type"])
+        row["acos"]=row["spend"]/row["ad_sales"] if row["ad_sales"] else None
+        row["cpc"]=row["spend"]/row["clicks"] if row["clicks"] else None
+        history_lookup.setdefault(key,[]).append(row)
+    bid_lookup={}
+    for raw in bid_rows:
+        row=dict(raw); key=(row["campaign_name"] or "",row["ad_group_name"] or "",row["target_value"] or "")
+        bid_lookup.setdefault(key,row)
     rank_lookup={k["phrase"].lower():k for k in _keyword_history(brand)}
     target_plan=[]
     for raw in target_rows:
@@ -831,6 +852,10 @@ def keyword_playbook(period_start, period_end, brand):
         target["cvr"]=min(target["orders"]/target["clicks"],1) if target["clicks"] else None
         target["modeled_max_cpc"]=(allowable_ad_per_order*target["cvr"]
                                    if target["clicks"]>=5 and target["cvr"] is not None else None)
+        target["history"]=history_lookup.get((target["campaign_name"],target["ad_group_name"],target["target"],target["match_type"]),[])[:6]
+        saved=bid_lookup.get((target["campaign_name"],target["ad_group_name"],target["target"])) or bid_lookup.get((target["campaign_name"],"",target["target"]))
+        target["amazon_suggested_low"]=saved.get("amazon_suggested_low") if saved else None
+        target["amazon_suggested_high"]=saved.get("amazon_suggested_high") if saved else None
         rank=rank_lookup.get((target["target"] or "").strip().lower())
         if rank:
             change=(rank["aug_rank"]-rank["jul_rank"] if rank.get("aug_rank") and rank.get("jul_rank") else None)
@@ -860,6 +885,16 @@ def keyword_playbook(period_start, period_end, brand):
             target["decision"]="Monitor"; target["reason"]="No target-level bid change is supported yet."
         target["confidence"]=("High" if target["clicks"]>=20 and target["orders"]>=5
                               else "Medium" if target["clicks"]>=8 else "Low")
+        target["is_actionable"]=target["decision"].startswith(("Reduce","Increase"))
+        if target["decision"].startswith("Reduce"):
+            pct=float(target["decision"].split()[-1].rstrip("%"))/100
+            target["proposed_bid"]=target["cpc"]*(1-pct) if target["cpc"] is not None else None
+            target["action_type"]="reduce_bid"
+        elif target["decision"].startswith("Increase"):
+            target["proposed_bid"]=target["cpc"]*1.10 if target["cpc"] is not None else None
+            target["action_type"]="increase_bid_test"
+        else:
+            target["proposed_bid"]=None; target["action_type"]="protect" if target["decision"]=="Hold bid" else "monitor"
         target_plan.append(target)
     target_plan.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["target"].lower()))
     campaign_map={}

@@ -25,6 +25,8 @@ def connect():
         "action_type": "TEXT", "baseline_json": "TEXT", "approved_at": "TEXT",
         "executed_at": "TEXT", "review_14_date": "TEXT", "outcome": "TEXT",
         "external_status": "TEXT",
+        "ad_group_name": "TEXT", "match_type": "TEXT",
+        "amazon_suggested_low": "REAL", "amazon_suggested_high": "REAL",
     }
     for column, kind in additions.items():
         if column not in existing:
@@ -64,8 +66,9 @@ def record_action_proposal(data):
         cur=conn.execute("""INSERT INTO interventions
           (created_at,brand,asin,intervention_type,old_value,new_value,period_start,period_end,
            objective,review_date,review_14_date,status,campaign_name,entity_type,
-           entity_name,action_type,baseline_json,external_status)
-          VALUES (CURRENT_TIMESTAMP,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+           entity_name,action_type,baseline_json,external_status,ad_group_name,match_type,
+           amazon_suggested_low,amazon_suggested_high)
+          VALUES (CURRENT_TIMESTAMP,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
             data["brand"], data.get("asin") or "—", "ppc_action",
             data.get("old_value"), data.get("new_value"), data["period_start"],
             data["period_end"], data["objective"],
@@ -73,7 +76,8 @@ def record_action_proposal(data):
             (today+timedelta(days=14)).isoformat(), "proposed",
             data["campaign_name"], data["entity_type"], data["entity_name"],
             data["action_type"], json.dumps(data.get("baseline",{}),sort_keys=True),
-            "awaiting_mcp_approval",
+            "awaiting_mcp_approval", data.get("ad_group_name"),data.get("match_type"),
+            data.get("amazon_suggested_low"),data.get("amazon_suggested_high"),
         ))
         return cur.lastrowid, True
 

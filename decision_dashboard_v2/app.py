@@ -300,11 +300,15 @@ def create_proposal():
     new_value=float(request.form["new_value"])
     record_action_proposal({"brand":request.form["brand"],"campaign_name":request.form["campaign_name"],
       "entity_type":request.form["entity_type"],"entity_name":request.form["entity_name"],
+      "ad_group_name":request.form.get("ad_group_name"),"match_type":request.form.get("match_type"),
       "action_type":request.form["action_type"],"old_value":old_value,"new_value":new_value,
       "period_start":request.form["period_start"],"period_end":request.form["period_end"],
       "objective":request.form["objective"],"baseline":{"spend":float(request.form["spend"]),
       "clicks":float(request.form["clicks"]),"orders":float(request.form["orders"]),
-      "acos":float(request.form["acos"])}})
+      "ad_sales":float(request.form.get("ad_sales") or 0),
+      "acos":float(request.form["acos"]) if request.form.get("acos") else None},
+      "amazon_suggested_low":float(request.form["amazon_suggested_low"]) if request.form.get("amazon_suggested_low") else None,
+      "amazon_suggested_high":float(request.form["amazon_suggested_high"]) if request.form.get("amazon_suggested_high") else None})
     return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}"))
 
 @app.post("/decisions/interventions/<int:intervention_id>/status")
