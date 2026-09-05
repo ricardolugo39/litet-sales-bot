@@ -1143,47 +1143,57 @@ def executive_actions(period_start, period_end, brand, ranked_actions):
         return {"headline":f"Prioritize {top['color'] or ''} {top['size'] or ''}",
                 "steps":[{"action":top["next_step"],"why":top["reason"]}],
                 "evidence":f"Approximately ${impact:,.0f} of measured exposure is attached to this alert."}
-    case=pricing_case(period_start,period_end,brand,top["asin"])
-    ppc=ppc_decisions(period_start,period_end,brand)
-    litet_playbook=keyword_playbook(period_start,period_end,brand)
-    playbook_rows=(litet_playbook["focus"]+litet_playbook["reduce"]+litet_playbook["watch"] if litet_playbook else [])
-    def target_total(campaign,target,match_type):
-        row=next((r for r in playbook_rows if r["campaign_name"]==campaign and r["target"]==target and r["match_type"]==match_type),None)
-        return row.get("target_total",{}) if row else {}
-    def term(search_term,target=None):
-        return next((r for r in ppc if r["search_term"].lower()==search_term.lower() and (target is None or r["target"].lower()==target.lower())),None)
-    white=term("white cycling socks","white cycling socks")
-    cycling=term("cycling socks","cycling socks")
-    white_target=target_total("LITET Ranking Campaign","white cycling socks","PHRASE")
-    cycling_target=target_total("LITET Ranking Campaign","cycling socks","BROAD")
-    men_good=term("cycling socks for men","men cycling socks")
-    men_bad=term("cycling socks for men","road cycling socks men")
-    productive=[r for r in ppc if r["orders"]>=1 and r["acos"] is not None and r["acos"]<=.30][:5]
-    steps=[]
-    price_candidate=case["scenarios"][1] if len(case["scenarios"])>1 else None
-    candidate_text=(f"If returns normalize, ${price_candidate['price']:.2f} is the first test candidate and needs {price_candidate['lift_needed']:.0%} more net units to preserve contribution."
-                    if price_candidate and price_candidate.get("lift_needed") is not None else
-                    "The selected range does not support a contribution-preserving lower-price scenario.")
-    return_rate_text=f"{case['return_rate']:.0%}" if case.get("return_rate") is not None else "not yet measurable"
-    steps.append({"action":f"Hold {top['color']} {top['size']} {top['pack_type']} at ${case['current_price']:.2f} for now.",
-                  "why":f"Its settled return rate is {return_rate_text} and {case['current_units']:.0f} net units settled; price elasticity is not reliable yet. {candidate_text}"})
-    steps.append({"action":"Do not change PPC because of this 3-pack decline.",
-                  "why":"The campaigns advertise the hero ASIN, not this 3-pack child. PPC may support the parent, but it is not a direct traffic lever for B0FFPT16G6."})
-    if white:
-        steps.append({"action":"In LITET Ranking Campaign, reduce the ‘white cycling socks’ PHRASE bid by 15%.",
-                      "why":f"The full target spent ${white_target.get('spend',white['spend']):.2f} at {white_target.get('acos',white['acos']):.0%} ACoS; the ‘white cycling socks’ customer query is only one component. Sponsored rank is #1 while organic rank is #6. Measure total units and organic rank for 7 days—do not pause it."})
-    if cycling:
-        steps.append({"action":"In LITET Ranking Campaign, reduce the ‘cycling socks’ BROAD bid by 10%.",
-                      "why":f"The full broad target spent ${cycling_target.get('spend',cycling['spend']):.2f} at {cycling_target.get('acos',cycling['acos']):.0%} ACoS; the exact-match customer query shown in the detail table is only part of that total. Organic rank is stable at #16 and sponsored rank is #3, so use a small reduction rather than a shutdown."})
-    if men_good and men_bad:
-        suggested=(men_good["cpc"] or 0)*.9
-        steps.append({"action":f"Add ‘cycling socks for men’ as EXACT at about ${suggested:.2f}; in LITET Scale, reduce the overlapping ‘road cycling socks men’ BROAD bid by 20%.",
-                      "why":f"The discovery path produced {men_good['orders']:.0f} orders at {men_good['acos']:.0%} ACoS. The overlapping scale path spent ${men_bad['spend']:.2f} across {men_bad['clicks']:.0f} clicks with no orders."})
-    steps.append({"action":"Add no negative keywords today; put women’s and DeFeet queries on a 7-day watchlist.",
-                  "why":"Those queries have not accumulated enough clicks individually to justify blocking them, and women’s cycling socks remains relevant to a unisex listing."})
-    return {"headline":f"Prioritize {top['color']} {top['size']} {top['pack_type']}—but separate the product decision from hero-ASIN PPC.",
+    trend=monthly_trend(brand)
+    current=trend[-1]
+    current_start,current_end=current["period_start"],current["period_end"]
+    from datetime import date, timedelta
+    current_start_date=date.fromisoformat(current_start)
+    current_end_date=date.fromisoformat(current_end)
+    prior_end=(current_start_date-timedelta(days=1)).replace(day=current_end_date.day)
+    prior_start=prior_end.replace(day=1)
+    ppc=ppc_decisions(current_start,current_end,brand)
+    productive=[r for r in ppc if r["orders"]>=1 and r["acos"] is not None and r["acos"]<=.35]
+    inefficient=[r for r in ppc if r["clicks"]>=8 and r["acos"] is not None and r["acos"]>1]
+    inefficient.sort(key=lambda r:r["spend"],reverse=True)
+    with connect() as conn:
+        prior_sales=conn.execute("""SELECT COALESCE(SUM(CAST(o."item-price" AS REAL)-COALESCE(CAST(o."item-promotion-discount" AS REAL),0)),0)
+          FROM orders o JOIN dim_product p ON p.asin=o.asin
+          WHERE date(substr(o."purchase-date",1,10)) BETWEEN ? AND ? AND p.canonical_brand=?
+            AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
+            AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')""",
+          (prior_start.isoformat(),prior_end.isoformat(),brand)).fetchone()[0]
+        campaigns=conn.execute("""SELECT campaign_name,SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders
+          FROM ppc_fact_clean WHERE brand=? AND report_date BETWEEN ? AND ?
+          GROUP BY campaign_name ORDER BY spend DESC""",(brand,current_start,current_end)).fetchall()
+        inventory=conn.execute("""WITH latest AS (SELECT MAX(snapshot_date) d FROM inventory_snapshots),
+          inv AS (SELECT i.asin,SUM(CAST(i."Quantity Available" AS REAL)) qty FROM inventory_snapshots i,latest WHERE i.snapshot_date=latest.d GROUP BY i.asin),
+          sales AS (SELECT o.asin,SUM(CAST(o.quantity AS REAL)) units FROM orders o WHERE date(substr(o."purchase-date",1,10)) BETWEEN date(?,'-29 days') AND ? AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled') GROUP BY o.asin)
+          SELECT p.color,p.size,p.pack_type,inv.qty,30.0*sales.units/30.0 velocity,CASE WHEN sales.units>0 THEN inv.qty/(sales.units/30.0) END cover
+          FROM inv JOIN dim_product p ON p.asin=inv.asin JOIN sales ON sales.asin=inv.asin
+          WHERE p.canonical_brand=? ORDER BY cover LIMIT 1""",(current_end,current_end,brand)).fetchone()
+    tacos=current["tacos"]
+    ad_sales=sum(r["ad_sales"] or 0 for r in campaigns)
+    total_acos=current["ad_spend"]/ad_sales if ad_sales else None
+    bad=inefficient[0] if inefficient else None
+    good=min(productive,key=lambda r:r["acos"]) if productive else None
+    ppc_detail=(f" ‘{bad['search_term']}’ used ${bad['spend']:.2f} across {bad['clicks']:.0f} clicks at {bad['acos']:.0%} ACoS; reduce that path, while protecting ‘{good['search_term']}’ at {good['acos']:.0%} ACoS."
+                if bad and good else " Review the highest-spend search terms before changing broad campaign budgets.")
+    change=current["ordered_sales"]/prior_sales-1 if prior_sales else None
+    avg_current=current["ordered_sales"]/((current_end_date-current_start_date).days+1)
+    prior_full=trend[-2]
+    avg_prior=prior_full["ordered_sales"]/date.fromisoformat(prior_full["period_end"]).day
+    steps=[
+      {"action":"ACT NOW — Stop PPC budget increases and isolate inefficient traffic.",
+       "why":f"Current MTD sales are ${current['ordered_sales']:,.0f} against ${current['ad_spend']:,.0f} of ad spend: {tacos:.0%} TaCoS and {total_acos:.0%} aggregate ACoS.{ppc_detail}"},
+      {"action":"WATCH — Do not change price from four days of demand.",
+       "why":f"Sales are {change:+.0%} versus the same days last month, but the ${avg_current:,.0f} current daily pace is {avg_current/avg_prior-1:+.0%} versus last month's full-period average. Reassess after 7 complete days."},
+    ]
+    if inventory:
+        steps.append({"action":f"ACT NOW — Confirm replenishment for {inventory['color']} {inventory['size']} {inventory['pack_type']}.",
+                      "why":f"Only {inventory['qty']:.0f} FBA units remain, approximately {inventory['cover']:.0f} days of cover at the trailing 30-day rate. Confirm AWD and inbound inventory before setting a transfer quantity."})
+    return {"headline":f"Current account view through {current_end}: control PPC efficiency while protecting demand.",
             "steps":steps,"productive_terms":productive,
-            "evidence":f"Ordered-sales run rate fell; approximately ${top['estimated_30d_impact']:,.0f} of 30-day ordered revenue is at risk."}
+            "evidence":f"Uses daily orders and PPC through {current_end}; settlement economics and traffic are withheld where the current report crosses months."}
 
 
 def executive_diagnosis(period_start, period_end, brand, ceo_action):
