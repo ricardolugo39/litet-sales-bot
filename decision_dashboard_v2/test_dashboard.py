@@ -36,6 +36,15 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"09/26 MTD", response.data)
         self.assertIn(b"Monthly ordered sales ($) + TaCoS (%)", response.data)
 
+    def test_current_mtd_uses_latest_available_settled_pnl(self):
+        response = self.client.get(
+            "/?brand=Litet&period=2026-09-01%7C2026-09-04"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Current operations \xc2\xb7 2026-09-01\xe2\x80\x932026-09-04", response.data)
+        self.assertIn(b"Latest settled period \xc2\xb7 2026-08-01\xe2\x80\x932026-08-27", response.data)
+        self.assertNotIn(b"Net sales</span><b>$0</b>", response.data)
+
     def test_brand_and_period_filter(self):
         response = self.client.get(
             "/?brand=Has10&period=2026-08-01%7C2026-08-16"

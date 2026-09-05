@@ -226,7 +226,21 @@ def common(page):
 def executive():
     ctx=common("executive"); start,end,brand=ctx["start"],ctx["end"],ctx["brand"]; actions,prior=action_queue(start,end,brand)
     ceo_action=executive_actions(start,end,brand,actions)
-    ctx.update(actions=actions,prior_period=prior,trend=monthly_trend(brand),pnl=pnl_statement(start,end,brand),costs=cost_diagnosis(start,end,brand),brands=brand_split(start,end),market=market_context(brand),ceo_action=ceo_action,diagnosis=executive_diagnosis(start,end,brand,ceo_action))
+    selected_metrics=ctx["metrics"]
+    pnl_start,pnl_end=start,end
+    if not selected_metrics.get("net_sales"):
+        settled=next((p for p in ctx["periods"]
+                      if p.get("group") == "Monthly periods"
+                      and p.get("has_economics")),None)
+        if settled:
+            pnl_start,pnl_end=settled["period_start"],settled["period_end"]
+            ctx["metrics"]=overview(pnl_start,pnl_end,brand)
+    ctx.update(actions=actions,prior_period=prior,trend=monthly_trend(brand),
+               pnl=pnl_statement(pnl_start,pnl_end,brand),
+               costs=cost_diagnosis(pnl_start,pnl_end,brand),
+               brands=brand_split(pnl_start,pnl_end),market=market_context(brand),
+               ceo_action=ceo_action,
+               diagnosis=executive_diagnosis(pnl_start,pnl_end,brand,ceo_action))
     return render_template("dashboard.html",**ctx)
 
 @app.get("/products")
