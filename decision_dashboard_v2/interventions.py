@@ -47,7 +47,25 @@ def record_pricing_case(data):
 
 def recent_interventions(limit=20):
     with connect() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM interventions ORDER BY created_at DESC,id DESC LIMIT ?",(limit,))]
+        rows=[dict(r) for r in conn.execute("SELECT * FROM interventions ORDER BY created_at DESC,id DESC LIMIT ?",(limit,))]
+    analytics_path=os.getenv("LITET_DB_PATH")
+    if analytics_path and Path(analytics_path).exists():
+        with sqlite3.connect(analytics_path) as facts:
+            facts.row_factory=sqlite3.Row
+            for row in rows:
+                if row.get("intervention_type")!="ppc_action" or (row.get("ad_group_name") and row.get("match_type")):
+                    continue
+                match=facts.execute("""SELECT ad_group_name,match_type,SUM(spend) spend
+                  FROM ppc_fact_clean WHERE brand=? AND campaign_name=? AND target=?
+                  GROUP BY ad_group_name,match_type ORDER BY SUM(spend) DESC LIMIT 1""",
+                  (row["brand"],row.get("campaign_name"),row.get("entity_name"))).fetchone()
+                if match:
+                    row["ad_group_name"]=match["ad_group_name"]
+                    row["match_type"]=match["match_type"]
+    for row in rows:
+        try: row["baseline"]=json.loads(row.get("baseline_json") or "{}")
+        except json.JSONDecodeError: row["baseline"]={}
+    return rows
 
 
 def record_action_proposal(data):
