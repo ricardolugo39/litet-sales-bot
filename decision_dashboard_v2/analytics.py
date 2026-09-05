@@ -1202,7 +1202,11 @@ def executive_diagnosis(period_start, period_end, brand, ceo_action):
     import calendar
     metrics=overview(period_start,period_end,brand)
     trend=monthly_trend(brand)
-    current=next((r for r in reversed(trend) if r["period_start"][:7]==period_start[:7]),None)
+    # LITET's executive priorities are an operating-now view. Keep their pace,
+    # confidence and comparison anchored to the latest common daily cutoff even
+    # when the selected period below is the latest settled P&L month.
+    current=(trend[-1] if brand == "Litet" and trend else
+             next((r for r in reversed(trend) if r["period_start"][:7]==period_start[:7]),None))
     prior=next((r for r in reversed(trend) if not r["is_partial"] and (not current or r["period_start"]<current["period_start"])),None)
     current_end=date.fromisoformat(current["period_end"]) if current else date.fromisoformat(period_end)
     current_start=date.fromisoformat(current["period_start"]) if current else date.fromisoformat(period_start)
@@ -1225,7 +1229,7 @@ def executive_diagnosis(period_start, period_end, brand, ceo_action):
     if brand=="Has10" and margin is not None and margin<floor: status="Seasonal scale is not covering the contribution floor"
     protections=[{"title":"Avoid broad traffic cuts","reason":"Evaluate total sales, sessions, conversion and organic rank before reducing strategic category coverage."}]
     if ceo_action.get("productive_terms"):
-        protections.append({"title":"Preserve proven demand","reason":f"{len(ceo_action['productive_terms'])} productive search terms have conversion evidence in the selected period."})
+        protections.append({"title":"Preserve proven demand","reason":f"{len(ceo_action['productive_terms'])} productive search terms have conversion evidence in the current operating period through {current['period_end'] if current else period_end}."})
     priority_actions={p["action"] for p in ceo_action.get("steps",[])[:3]}
     for step in ceo_action.get("steps",[]):
         if (step["action"] not in priority_actions and
@@ -1235,6 +1239,9 @@ def executive_diagnosis(period_start, period_end, brand, ceo_action):
             "sales_pace_change":sales_change,"traffic_pace_change":traffic_change,
             "conversion_change":conversion_change,"causes":causes,
             "prior_label":prior["period_start"][:7] if prior else None,
+            "operating_start":current["period_start"] if current else period_start,
+            "operating_end":current["period_end"] if current else period_end,
+            "pnl_start":period_start,"pnl_end":period_end,
             "confidence":"Medium" if current and current["is_partial"] else "High",
             "priorities":ceo_action.get("steps",[])[:3],"protections":protections,
             "review_window":"Review interventions after 7 complete days; confirm at 14 days."}
