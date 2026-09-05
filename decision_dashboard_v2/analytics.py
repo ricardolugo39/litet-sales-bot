@@ -336,24 +336,34 @@ def monthly_trend(brand):
             f"""
             WITH latest AS (
               SELECT MAX(period_end) max_date FROM business_traffic
-            ), asin_traffic AS (
-              SELECT substr(period_start,1,7) month, child_asin AS asin,
+            ), traffic_slices AS (
+              SELECT CASE
+                       WHEN substr(period_start,1,7) <> substr(period_end,1,7)
+                         THEN substr(period_end,1,7)
+                       ELSE substr(period_start,1,7)
+                     END month,
+                     period_start, period_end, child_asin AS asin,
                      MAX(sessions_total) sessions,
                      SUM(units_ordered) units,
                      SUM(ordered_product_sales) ordered_sales
-              FROM business_traffic, latest
-              WHERE period_type='monthly' OR substr(period_start,1,7)=substr(max_date,1,7)
-              GROUP BY substr(period_start,1,7), period_start, period_end, child_asin
+              FROM business_traffic
+              GROUP BY month, period_start, period_end, child_asin
             ), traffic_month AS (
               SELECT month, asin, SUM(sessions) sessions, SUM(units) units,
                      SUM(ordered_sales) ordered_sales
-              FROM asin_traffic GROUP BY month, asin
-            ), econ AS (
-              SELECT substr(e.period_start,1,7) month, SUM(e.sponsored_products_charge) ad_spend
+              FROM traffic_slices GROUP BY month, asin
+            ), econ_slices AS (
+              SELECT CASE
+                       WHEN substr(e.period_start,1,7) <> substr(e.period_end,1,7)
+                         THEN substr(e.period_end,1,7)
+                       ELSE substr(e.period_start,1,7)
+                     END month,
+                     e.period_start, e.period_end, e.sponsored_products_charge
               FROM asin_economics e JOIN dim_product ep ON ep.asin=e.asin
-              WHERE {where.replace('p.', 'ep.')} AND
-                    (e.period_type='monthly' OR substr(e.period_start,1,7)=(SELECT substr(MAX(period_end),1,7) FROM business_traffic))
-              GROUP BY substr(e.period_start,1,7)
+              WHERE {where.replace('p.', 'ep.')}
+            ), econ AS (
+              SELECT month, SUM(sponsored_products_charge) ad_spend
+              FROM econ_slices GROUP BY month
             )
             SELECT a.month || '-01' period_start,
                    CASE WHEN a.month=(SELECT substr(max_date,1,7) FROM latest)

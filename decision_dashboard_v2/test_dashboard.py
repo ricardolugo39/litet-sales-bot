@@ -100,11 +100,17 @@ class DashboardTest(unittest.TestCase):
 
     def test_monthly_trend_contains_consolidated_current_mtd(self):
         from decision_dashboard_v2.analytics import monthly_trend
-        august = [r for r in monthly_trend("Litet") if r["period_start"] == "2026-08-01"]
+        trend = monthly_trend("Litet")
+        august = [r for r in trend if r["period_start"] == "2026-08-01"]
+        september = [r for r in trend if r["period_start"] == "2026-09-01"]
         self.assertEqual(len(august), 1)
-        self.assertEqual(august[0]["period_end"], "2026-08-23")
-        self.assertTrue(august[0]["is_partial"])
+        self.assertEqual(august[0]["period_end"], "2026-08-31")
+        self.assertFalse(august[0]["is_partial"])
         self.assertGreater(august[0]["ordered_sales"], 0)
+        self.assertEqual(len(september), 1)
+        self.assertEqual(september[0]["period_end"], "2026-09-04")
+        self.assertTrue(september[0]["is_partial"])
+        self.assertGreater(september[0]["ordered_sales"], 0)
 
     def test_pnl_displays_cogs_and_reconciles_to_contribution(self):
         from decision_dashboard_v2.analytics import pnl_statement
