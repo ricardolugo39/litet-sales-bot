@@ -330,57 +330,46 @@ def brand_split(period_start, period_end):
 
 
 def monthly_trend(brand):
-    where, params = _brand_clause("p", brand)
+    order_where, order_params = _brand_clause("p", brand)
+    ppc_where = "1=1" if brand == "All" else "brand=?"
+    ppc_params = [] if brand == "All" else [brand]
     with connect() as conn:
         rows = conn.execute(
             f"""
             WITH latest AS (
-              SELECT MAX(period_end) max_date FROM business_traffic
-            ), traffic_slices AS (
-              SELECT CASE
-                       WHEN substr(period_start,1,7) <> substr(period_end,1,7)
-                         THEN substr(period_end,1,7)
-                       ELSE substr(period_start,1,7)
-                     END month,
-                     period_start, period_end, child_asin AS asin,
-                     MAX(sessions_total) sessions,
-                     SUM(units_ordered) units,
-                     SUM(ordered_product_sales) ordered_sales
-              FROM business_traffic
-              GROUP BY month, period_start, period_end, child_asin
-            ), traffic_month AS (
-              SELECT month, asin, SUM(sessions) sessions, SUM(units) units,
-                     SUM(ordered_sales) ordered_sales
-              FROM traffic_slices GROUP BY month, asin
-            ), econ_slices AS (
-              SELECT CASE
-                       WHEN substr(e.period_start,1,7) <> substr(e.period_end,1,7)
-                         THEN substr(e.period_end,1,7)
-                       ELSE substr(e.period_start,1,7)
-                     END month,
-                     e.period_start, e.period_end, e.sponsored_products_charge
-              FROM asin_economics e JOIN dim_product ep ON ep.asin=e.asin
-              WHERE {where.replace('p.', 'ep.')}
-            ), econ AS (
-              SELECT month, SUM(sponsored_products_charge) ad_spend
-              FROM econ_slices GROUP BY month
+              SELECT MIN(
+                (SELECT MAX(date(substr("purchase-date",1,10))) FROM orders),
+                (SELECT MAX(date(report_date)) FROM ppc_fact_clean)
+              ) max_date
+            ), sales AS (
+              SELECT substr(o."purchase-date",1,7) month,
+                     SUM(CAST(o.quantity AS REAL)) units,
+                     SUM(CAST(o."item-price" AS REAL)
+                         - COALESCE(CAST(o."item-promotion-discount" AS REAL),0)) ordered_sales
+              FROM orders o JOIN dim_product p ON p.asin=o.asin, latest
+              WHERE date(substr(o."purchase-date",1,10)) <= latest.max_date
+                AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
+                AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')
+                AND {order_where}
+              GROUP BY substr(o."purchase-date",1,7)
+            ), ads AS (
+              SELECT substr(report_date,1,7) month, SUM(spend) ad_spend
+              FROM ppc_fact_clean, latest
+              WHERE date(report_date) <= latest.max_date AND {ppc_where}
+              GROUP BY substr(report_date,1,7)
             )
-            SELECT a.month || '-01' period_start,
-                   CASE WHEN a.month=(SELECT substr(max_date,1,7) FROM latest)
+            SELECT s.month || '-01' period_start,
+                   CASE WHEN s.month=(SELECT substr(max_date,1,7) FROM latest)
                         THEN (SELECT max_date FROM latest)
-                        ELSE date(a.month || '-01','+1 month','-1 day') END period_end,
-                   CASE WHEN a.month=(SELECT substr(max_date,1,7) FROM latest) THEN 'mtd' ELSE 'monthly' END period_type,
-                   SUM(a.sessions) sessions, SUM(a.units) units,
-                   SUM(a.ordered_sales) ordered_sales,
-                   CASE WHEN SUM(a.sessions)>0 THEN 1.0*SUM(a.units)/SUM(a.sessions) END conversion,
-                   MAX(COALESCE(e.ad_spend,0)) ad_spend,
-                   CASE WHEN SUM(a.ordered_sales)>0 THEN MAX(COALESCE(e.ad_spend,0))/SUM(a.ordered_sales) END tacos
-            FROM traffic_month a JOIN dim_product p ON p.asin=a.asin
-            LEFT JOIN econ e ON e.month=a.month
-            WHERE {where}
-            GROUP BY a.month ORDER BY a.month
+                        ELSE date(s.month || '-01','+1 month','-1 day') END period_end,
+                   CASE WHEN s.month=(SELECT substr(max_date,1,7) FROM latest) THEN 'mtd' ELSE 'monthly' END period_type,
+                   NULL sessions, s.units, s.ordered_sales, NULL conversion,
+                   COALESCE(a.ad_spend,0) ad_spend,
+                   CASE WHEN s.ordered_sales>0 THEN COALESCE(a.ad_spend,0)/s.ordered_sales END tacos
+            FROM sales s LEFT JOIN ads a ON a.month=s.month
+            ORDER BY s.month
             """,
-            [*params, *params],
+            [*order_params, *ppc_params],
         ).fetchall()
     result=[dict(row) for row in rows]
     for row in result:

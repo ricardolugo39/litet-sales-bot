@@ -111,6 +111,7 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(september[0]["period_end"], "2026-09-04")
         self.assertTrue(september[0]["is_partial"])
         self.assertGreater(september[0]["ordered_sales"], 0)
+        self.assertLess(september[0]["ordered_sales"], august[0]["ordered_sales"])
 
     def test_pnl_displays_cogs_and_reconciles_to_contribution(self):
         from decision_dashboard_v2.analytics import pnl_statement
