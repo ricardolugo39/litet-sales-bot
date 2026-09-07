@@ -305,6 +305,10 @@ def create_proposal():
     new_value=round(old_value*(1+adjustment_pct),2)
     if old_value<=0 or new_value<=0:
         raise ValueError("Amazon bid must be positive")
+    amazon_low=float(request.form["amazon_suggested_low"]) if request.form.get("amazon_suggested_low") else None
+    amazon_high=float(request.form["amazon_suggested_high"]) if request.form.get("amazon_suggested_high") else None
+    if amazon_low is not None and amazon_high is not None and amazon_low>amazon_high:
+        raise ValueError("Amazon suggested low cannot exceed high")
     record_action_proposal({"brand":request.form["brand"],"campaign_name":request.form["campaign_name"],
       "entity_type":request.form["entity_type"],"entity_name":request.form["entity_name"],
       "ad_group_name":request.form.get("ad_group_name"),"match_type":request.form.get("match_type"),
@@ -314,8 +318,7 @@ def create_proposal():
       "clicks":float(request.form["clicks"]),"orders":float(request.form["orders"]),
       "ad_sales":float(request.form.get("ad_sales") or 0),
       "acos":float(request.form["acos"]) if request.form.get("acos") else None},
-      "amazon_suggested_low":float(request.form["amazon_suggested_low"]) if request.form.get("amazon_suggested_low") else None,
-      "amazon_suggested_high":float(request.form["amazon_suggested_high"]) if request.form.get("amazon_suggested_high") else None})
+      "amazon_suggested_low":amazon_low,"amazon_suggested_high":amazon_high})
     return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}"))
 
 @app.post("/decisions/interventions/<int:intervention_id>/status")
