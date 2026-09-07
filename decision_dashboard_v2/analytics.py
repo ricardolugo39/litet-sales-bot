@@ -888,13 +888,15 @@ def keyword_playbook(period_start, period_end, brand):
         target["is_actionable"]=target["decision"].startswith(("Reduce","Increase"))
         if target["decision"].startswith("Reduce"):
             pct=float(target["decision"].split()[-1].rstrip("%"))/100
-            target["proposed_bid"]=target["cpc"]*(1-pct) if target["cpc"] is not None else None
+            target["adjustment_pct"]=-pct
+            target["proposed_bid"]=None
             target["action_type"]="reduce_bid"
         elif target["decision"].startswith("Increase"):
-            target["proposed_bid"]=target["cpc"]*1.10 if target["cpc"] is not None else None
+            target["adjustment_pct"]=.10
+            target["proposed_bid"]=None
             target["action_type"]="increase_bid_test"
         else:
-            target["proposed_bid"]=None; target["action_type"]="protect" if target["decision"]=="Hold bid" else "monitor"
+            target["adjustment_pct"]=None; target["proposed_bid"]=None; target["action_type"]="protect" if target["decision"]=="Hold bid" else "monitor"
         target_plan.append(target)
     target_plan.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["target"].lower()))
     campaign_map={}

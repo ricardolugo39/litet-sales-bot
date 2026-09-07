@@ -298,8 +298,13 @@ def approve_pricing():
 
 @app.post("/decisions/proposals")
 def create_proposal():
-    old_value=float(request.form["old_value"])
-    new_value=float(request.form["new_value"])
+    if not request.form.get("actual_bid"):
+        return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}"))
+    old_value=float(request.form["actual_bid"])
+    adjustment_pct=float(request.form["adjustment_pct"])
+    new_value=round(old_value*(1+adjustment_pct),2)
+    if old_value<=0 or new_value<=0:
+        raise ValueError("Amazon bid must be positive")
     record_action_proposal({"brand":request.form["brand"],"campaign_name":request.form["campaign_name"],
       "entity_type":request.form["entity_type"],"entity_name":request.form["entity_name"],
       "ad_group_name":request.form.get("ad_group_name"),"match_type":request.form.get("match_type"),
