@@ -121,10 +121,13 @@ def record_action_proposal(data):
     with connect() as conn:
         duplicate = conn.execute("""SELECT id FROM interventions
           WHERE brand=? AND campaign_name=? AND entity_type=? AND entity_name=?
+            AND COALESCE(ad_group_name,'')=COALESCE(?,'')
+            AND COALESCE(match_type,'')=COALESCE(?,'')
             AND action_type=? AND status IN ('proposed','approved','executed','monitoring')
           ORDER BY id DESC LIMIT 1""",(
             data["brand"], data["campaign_name"], data["entity_type"],
-            data["entity_name"], data["action_type"],
+            data["entity_name"], data.get("ad_group_name"), data.get("match_type"),
+            data["action_type"],
         )).fetchone()
         if duplicate:
             return duplicate[0], False
