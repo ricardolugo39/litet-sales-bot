@@ -29,6 +29,16 @@ else:  # Supports `python app.py` from this directory.
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
 
+
+@app.after_request
+def prevent_stale_dashboard(response):
+    """Operational pages must reflect the latest DB and workflow state."""
+    if response.mimetype == "text/html":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 REQUIRED_TABLES = {
     "orders", "business_traffic", "asin_economics", "inventory_snapshots",
     "dim_product", "cogs_ledger", "ppc_fact_clean",
