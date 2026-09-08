@@ -50,7 +50,7 @@ def record_pricing_case(data):
 
 def recent_interventions(limit=20):
     with connect() as conn:
-        rows=[dict(r) for r in conn.execute("SELECT * FROM interventions ORDER BY created_at DESC,id DESC LIMIT ?",(limit,))]
+        rows=[dict(r) for r in conn.execute("SELECT rowid AS intervention_rowid,* FROM interventions ORDER BY created_at DESC,rowid DESC LIMIT ?",(limit,))]
     analytics_path=os.getenv("LITET_DB_PATH")
     if analytics_path and Path(analytics_path).exists():
         with sqlite3.connect(analytics_path) as facts:
@@ -86,6 +86,9 @@ def recent_interventions(limit=20):
                         post["orders_per_day"]=post["orders"]/post["days"]
                     row["post"]=post
     for row in rows:
+        # Some early Railway records inherited a nullable legacy id column.
+        # The SQLite rowid is stable for the preserved table and drives controls.
+        row["id"]=row["intervention_rowid"]
         try: row["baseline"]=json.loads(row.get("baseline_json") or "{}")
         except json.JSONDecodeError: row["baseline"]={}
         if row.get("period_start") and row.get("period_end"):
@@ -159,5 +162,5 @@ def update_intervention_status(intervention_id, status):
     elif status in {"dismissed","reverted","completed"}: updates.update(outcome=status)
     assignments=", ".join(f"{column}=?" for column in updates)
     with connect() as conn:
-        conn.execute(f"UPDATE interventions SET {assignments} WHERE id=?",
+        conn.execute(f"UPDATE interventions SET {assignments} WHERE rowid=?",
                      (*updates.values(),intervention_id))
