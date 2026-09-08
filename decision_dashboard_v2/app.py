@@ -277,9 +277,18 @@ def decisions():
            if row["is_ppc_hero"] or row["is_ppc_test_candidate"] or row["status"] in {"Act now","Watch"}]
     cases.sort(key=lambda row: (0 if row["is_ppc_hero"] else 1 if row["is_ppc_test_candidate"] else 2,
                                 row["status_rank"], -(row["ordered_sales"] or 0)))
+    interventions=recent_interventions()
+    playbook=keyword_playbook(ctx["start"],ctx["end"],ctx["brand"])
+    active_keys={(i.get("campaign_name"),i.get("ad_group_name"),i.get("entity_name"),i.get("match_type"))
+                 for i in interventions if i.get("status") in {"proposed","approved","executed","monitoring"}}
+    if playbook:
+        for target in playbook["targets"]:
+            key=(target.get("campaign_name"),target.get("ad_group_name"),target.get("target"),target.get("match_type"))
+            if key in active_keys:
+                target["is_actionable"]=False
+                target["in_workflow"]=True
     ctx.update(actions=cases[:6],portfolio=portfolio,prior_period=portfolio["prior_period"],
-               interventions=recent_interventions(),
-               playbook=keyword_playbook(ctx["start"],ctx["end"],ctx["brand"]))
+               interventions=interventions,playbook=playbook)
     return render_template("dashboard.html",**ctx)
 
 @app.get("/decisions/pricing")
