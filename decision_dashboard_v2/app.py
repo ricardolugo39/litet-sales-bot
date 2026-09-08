@@ -281,7 +281,10 @@ def products():
 @app.get("/ppc")
 def ppc():
     ctx=common("ppc"); start,end,brand=ctx["start"],ctx["end"],ctx["brand"]
-    ctx.update(ppc_rows=ppc_decisions(start,end,brand),advertising=advertising_detail(start,end,brand),organic_trend=ppc_organic_trend(brand),playbook=keyword_playbook(start,end,brand),keyword_opportunities=keyword_opportunities(start,end,brand))
+    playbook=keyword_playbook(start,end,brand)
+    interventions=_interventions_for_brand(recent_interventions(),brand)
+    _mark_interventions_in_workflow(playbook,interventions)
+    ctx.update(ppc_rows=ppc_decisions(start,end,brand),advertising=advertising_detail(start,end,brand),organic_trend=ppc_organic_trend(brand),playbook=playbook,keyword_opportunities=keyword_opportunities(start,end,brand))
     return render_template("dashboard.html",**ctx)
 
 @app.get("/decisions")
@@ -293,6 +296,14 @@ def decisions():
                                 row["status_rank"], -(row["ordered_sales"] or 0)))
     interventions=_interventions_for_brand(recent_interventions(),ctx["brand"])
     playbook=keyword_playbook(ctx["start"],ctx["end"],ctx["brand"])
+    _mark_interventions_in_workflow(playbook,interventions)
+
+    ctx.update(actions=cases[:6],portfolio=portfolio,prior_period=portfolio["prior_period"],
+               interventions=interventions,playbook=playbook)
+    return render_template("dashboard.html",**ctx)
+
+
+def _mark_interventions_in_workflow(playbook,interventions):
     active_keys={(i.get("campaign_name"),i.get("ad_group_name"),i.get("entity_name"),i.get("match_type"))
                  for i in interventions if i.get("status") in {"proposed","approved","executed","monitoring"}}
     if playbook:
@@ -301,9 +312,6 @@ def decisions():
             if key in active_keys:
                 target["is_actionable"]=False
                 target["in_workflow"]=True
-    ctx.update(actions=cases[:6],portfolio=portfolio,prior_period=portfolio["prior_period"],
-               interventions=interventions,playbook=playbook)
-    return render_template("dashboard.html",**ctx)
 
 
 def _interventions_for_brand(interventions,brand):
