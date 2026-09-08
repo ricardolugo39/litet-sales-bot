@@ -211,7 +211,11 @@ def compact_money(value):
     return f"{sign}${value/1000:.1f}k" if value >= 1000 else f"{sign}${value:,.0f}"
 
 @app.template_filter("number")
-def number(value): return "—" if value is None else f"{value:,.0f}"
+def number(value):
+    if value is None: return "—"
+    numeric=float(value)
+    if numeric.is_integer(): return f"{numeric:,.0f}"
+    return f"{numeric:,.2f}".rstrip("0").rstrip(".")
 
 @app.template_filter("percent")
 def percent(value):
