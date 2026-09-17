@@ -1,5 +1,6 @@
 import unittest
 import os
+import sqlite3
 import tempfile
 from unittest.mock import patch
 
@@ -139,6 +140,65 @@ class DashboardTest(unittest.TestCase):
         self.assertAlmostEqual(reconciled, pnl["contribution"], places=6)
         response = self.client.get("/?brand=Litet&period=2026-08-01%7C2026-08-23")
         self.assertIn(b"Estimated COGS", response.data)
+
+    def test_pnl_uses_only_latest_cumulative_economics_snapshot(self):
+        from decision_dashboard_v2.analytics import cost_diagnosis, pnl_statement
+
+        database = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        database.close()
+        try:
+            with sqlite3.connect(database.name) as conn:
+                conn.executescript("""
+                    CREATE TABLE dim_product (
+                      asin TEXT PRIMARY KEY, canonical_brand TEXT,
+                      canonical_product_name TEXT, color TEXT, size TEXT,
+                      pack_type TEXT, product_family TEXT, product_key TEXT,
+                      is_current INTEGER
+                    );
+                    CREATE TABLE business_traffic (
+                      period_start TEXT, period_end TEXT, child_asin TEXT,
+                      sessions_total REAL, page_views_total REAL,
+                      units_ordered REAL, ordered_product_sales REAL,
+                      featured_offer_percentage REAL
+                    );
+                    CREATE TABLE asin_economics (
+                      period_start TEXT, period_end TEXT, asin TEXT,
+                      units_sold REAL, units_returned REAL, net_units_sold REAL,
+                      net_sales REAL, sponsored_products_charge REAL,
+                      net_proceeds REAL, fba_fulfillment_fees REAL,
+                      referral_fee REAL, referral_fee_refunds REAL,
+                      refund_administration_fee REAL, other_fee_total REAL
+                    );
+                    CREATE TABLE cogs_ledger (
+                      asin TEXT, effective_start TEXT, effective_end TEXT,
+                      unit_cogs REAL
+                    );
+                    CREATE TABLE inventory_snapshots (
+                      asin TEXT, snapshot_date TEXT, "Quantity Available" REAL
+                    );
+                    CREATE TABLE bridge_product_sku (
+                      product_key TEXT, sku TEXT, is_current INTEGER
+                    );
+                    INSERT INTO dim_product VALUES
+                      ('A1','Litet','Test product','Blue','M','single','Test','P1',1);
+                    INSERT INTO business_traffic VALUES
+                      ('2026-09-01','2026-09-16','A1',100,120,10,250,100);
+                    INSERT INTO cogs_ledger VALUES
+                      ('A1','2026-01-01',NULL,5);
+                    INSERT INTO asin_economics VALUES
+                      ('2026-09-01','2026-09-04','A1',4,0,4,100,20,50,20,15,0,1,4),
+                      ('2026-09-01','2026-09-16','A1',8,1,7,200,40,110,35,25,0,2,8);
+                """)
+            with patch.dict(os.environ, {"LITET_DB_PATH": database.name}):
+                pnl = pnl_statement("2026-09-01", "2026-09-16", "Litet")
+                costs = cost_diagnosis("2026-09-01", "2026-09-16", "Litet")
+            self.assertEqual(pnl["gross_sales"], 200)
+            self.assertEqual(pnl["ad_spend"], 40)
+            self.assertEqual(pnl["net_proceeds"], 110)
+            self.assertEqual(costs["net_sales"], 200)
+            self.assertEqual(costs["ads"], 40)
+        finally:
+            os.unlink(database.name)
 
     def test_has10_product_page_uses_has10_diagnosis(self):
         response = self.client.get(

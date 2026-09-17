@@ -208,6 +208,12 @@ def overview(period_start, period_end, brand):
         ).fetchone()
         economics = conn.execute(
             f"""
+            WITH latest_economics_periods AS (
+              SELECT period_start, MAX(period_end) AS period_end
+              FROM asin_economics
+              WHERE period_start>=? AND period_end<=?
+              GROUP BY period_start
+            )
             SELECT COALESCE(SUM(e.units_sold),0) units_sold,
                    COALESCE(SUM(e.units_returned),0) returns,
                    COALESCE(SUM(e.net_sales),0) net_sales,
@@ -222,8 +228,11 @@ def overview(period_start, period_end, brand):
                      ORDER BY c.effective_start DESC LIMIT 1
                    ),0)),0) estimated_cogs,
                    CASE WHEN SUM(e.units_sold)>0 THEN 1.0*SUM(e.units_returned)/SUM(e.units_sold) END return_rate
-            FROM asin_economics e JOIN dim_product p ON p.asin=e.asin
-            WHERE e.period_start>=? AND e.period_end<=? AND {where}
+            FROM asin_economics e
+            JOIN latest_economics_periods latest
+              ON latest.period_start=e.period_start AND latest.period_end=e.period_end
+            JOIN dim_product p ON p.asin=e.asin
+            WHERE {where}
             """,
             [period_start, period_end, *params],
         ).fetchone()
@@ -261,7 +270,13 @@ def cost_diagnosis(period_start, period_end, brand):
     where, params = _brand_clause("p", brand)
     with connect() as conn:
         row = conn.execute(
-            f"""SELECT COALESCE(SUM(e.net_sales),0) net_sales,
+            f"""WITH latest_economics_periods AS (
+                  SELECT period_start, MAX(period_end) AS period_end
+                  FROM asin_economics
+                  WHERE period_start>=? AND period_end<=?
+                  GROUP BY period_start
+                )
+                SELECT COALESCE(SUM(e.net_sales),0) net_sales,
                        COALESCE(SUM(e.fba_fulfillment_fees),0) fulfillment,
                        COALESCE(SUM(e.referral_fee + e.referral_fee_refunds),0) referral,
                        COALESCE(SUM(e.refund_administration_fee),0) refund_admin,
@@ -274,8 +289,11 @@ def cost_diagnosis(period_start, period_end, brand):
                            AND (c.effective_end IS NULL OR c.effective_end>=e.period_start)
                          ORDER BY c.effective_start DESC LIMIT 1
                        ),0)),0) cogs
-                FROM asin_economics e JOIN dim_product p ON p.asin=e.asin
-                WHERE e.period_start>=? AND e.period_end<=? AND {where}""",
+                FROM asin_economics e
+                JOIN latest_economics_periods latest
+                  ON latest.period_start=e.period_start AND latest.period_end=e.period_end
+                JOIN dim_product p ON p.asin=e.asin
+                WHERE {where}""",
             [period_start, period_end, *params],
         ).fetchone()
         traffic_where, traffic_params = _brand_clause("tp", brand)
@@ -459,10 +477,17 @@ def product_diagnostics(period_start, period_end, brand):
             ), traffic AS (
               SELECT asin,SUM(sessions) sessions,SUM(units) units,SUM(ordered_sales) ordered_sales,AVG(buy_box) buy_box
               FROM period_traffic GROUP BY asin
+            ), latest_economics_periods AS (
+              SELECT period_start, MAX(period_end) AS period_end
+              FROM asin_economics
+              WHERE period_start>=? AND period_end<=?
+              GROUP BY period_start
             ), econ AS (
               SELECT asin,SUM(net_sales) net_sales,SUM(net_proceeds) net_proceeds,
                      SUM(sponsored_products_charge) sponsored_products_charge,SUM(units_returned) units_returned
-              FROM asin_economics WHERE period_start>=? AND period_end<=? GROUP BY asin
+              FROM asin_economics e
+              JOIN latest_economics_periods latest USING (period_start, period_end)
+              GROUP BY asin
             ), inv AS (
               SELECT asin, SUM(CAST("Quantity Available" AS REAL)) inventory
               FROM inventory_snapshots
