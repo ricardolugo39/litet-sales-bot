@@ -133,6 +133,47 @@ class DashboardTest(unittest.TestCase):
         self.assertGreater(september[0]["ordered_sales"], 0)
         self.assertLess(september[0]["ordered_sales"], august[0]["ordered_sales"])
 
+    def test_monthly_trend_includes_sessions_without_summing_cumulative_snapshots(self):
+        from decision_dashboard_v2.analytics import monthly_trend
+
+        database = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        database.close()
+        try:
+            with sqlite3.connect(database.name) as conn:
+                conn.executescript("""
+                    CREATE TABLE dim_product (asin TEXT, canonical_brand TEXT);
+                    CREATE TABLE orders (
+                      asin TEXT, "purchase-date" TEXT, quantity REAL,
+                      "item-price" REAL, "item-promotion-discount" REAL,
+                      "order-status" TEXT, "item-status" TEXT
+                    );
+                    CREATE TABLE ppc_fact_clean (
+                      report_date TEXT, brand TEXT, spend REAL
+                    );
+                    CREATE TABLE business_traffic (
+                      period_start TEXT, period_end TEXT, child_asin TEXT,
+                      sessions_total REAL
+                    );
+                    INSERT INTO dim_product VALUES ('A1','Litet');
+                    INSERT INTO orders VALUES
+                      ('A1','2026-08-31',1,310,0,'Shipped','Shipped'),
+                      ('A1','2026-09-16',1,150,0,'Shipped','Shipped');
+                    INSERT INTO ppc_fact_clean VALUES
+                      ('2026-08-31','Litet',31),
+                      ('2026-09-16','Litet',15);
+                    INSERT INTO business_traffic VALUES
+                      ('2026-08-01','2026-08-16','A1',200),
+                      ('2026-08-17','2026-08-31','A1',110),
+                      ('2026-09-01','2026-09-04','A1',40),
+                      ('2026-09-01','2026-09-16','A1',150);
+                """)
+            with patch.dict(os.environ, {"LITET_DB_PATH": database.name}):
+                trend = monthly_trend("Litet")
+            self.assertEqual(trend[-2]["sessions"], 310)
+            self.assertEqual(trend[-1]["sessions"], 150)
+        finally:
+            os.unlink(database.name)
+
     def test_pnl_displays_cogs_and_reconciles_to_contribution(self):
         from decision_dashboard_v2.analytics import pnl_statement
         pnl = pnl_statement("2026-08-01", "2026-08-23", "Litet")

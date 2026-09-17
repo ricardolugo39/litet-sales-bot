@@ -349,6 +349,7 @@ def brand_split(period_start, period_end):
 
 def monthly_trend(brand):
     order_where, order_params = _brand_clause("p", brand)
+    traffic_where, traffic_params = _brand_clause("p", brand)
     ppc_where = "1=1" if brand == "All" else "brand=?"
     ppc_params = [] if brand == "All" else [brand]
     with connect() as conn:
@@ -378,19 +379,41 @@ def monthly_trend(brand):
                 AND substr(report_date,1,4) = substr(latest.max_date,1,4)
                 AND {ppc_where}
               GROUP BY substr(report_date,1,7)
+            ), latest_traffic_periods AS (
+              SELECT period_start, MAX(period_end) period_end
+              FROM business_traffic, latest
+              WHERE date(period_end) <= latest.max_date
+                AND substr(period_start,1,4) = substr(latest.max_date,1,4)
+              GROUP BY period_start
+            ), period_traffic AS (
+              SELECT t.period_start, t.period_end, t.child_asin,
+                     MAX(t.sessions_total) sessions
+              FROM business_traffic t
+              JOIN latest_traffic_periods selected
+                ON selected.period_start=t.period_start
+               AND selected.period_end=t.period_end
+              GROUP BY t.period_start, t.period_end, t.child_asin
+            ), traffic AS (
+              SELECT substr(t.period_start,1,7) month, SUM(t.sessions) sessions
+              FROM period_traffic t
+              JOIN dim_product p ON p.asin=t.child_asin
+              WHERE {traffic_where}
+              GROUP BY substr(t.period_start,1,7)
             )
             SELECT s.month || '-01' period_start,
                    CASE WHEN s.month=(SELECT substr(max_date,1,7) FROM latest)
                         THEN (SELECT max_date FROM latest)
                         ELSE date(s.month || '-01','+1 month','-1 day') END period_end,
                    CASE WHEN s.month=(SELECT substr(max_date,1,7) FROM latest) THEN 'mtd' ELSE 'monthly' END period_type,
-                   NULL sessions, s.units, s.ordered_sales, NULL conversion,
+                   tr.sessions, s.units, s.ordered_sales, NULL conversion,
                    COALESCE(a.ad_spend,0) ad_spend,
                    CASE WHEN s.ordered_sales>0 THEN COALESCE(a.ad_spend,0)/s.ordered_sales END tacos
-            FROM sales s LEFT JOIN ads a ON a.month=s.month
+            FROM sales s
+            LEFT JOIN ads a ON a.month=s.month
+            LEFT JOIN traffic tr ON tr.month=s.month
             ORDER BY s.month
             """,
-            [*order_params, *ppc_params],
+            [*order_params, *ppc_params, *traffic_params],
         ).fetchall()
     result=[dict(row) for row in rows]
     for row in result:
