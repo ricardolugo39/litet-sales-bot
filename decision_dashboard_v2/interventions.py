@@ -27,6 +27,7 @@ def connect():
         "external_status": "TEXT",
         "ad_group_name": "TEXT", "match_type": "TEXT",
         "amazon_suggested_low": "REAL", "amazon_suggested_high": "REAL",
+        "supersedes_intervention_id": "INTEGER",
     }
     for column, kind in additions.items():
         if column not in existing:
@@ -76,6 +77,7 @@ def recent_interventions(limit=20):
                     if row.get("match_type"):
                         clauses.append("match_type=?"); params.append(row["match_type"])
                     result=facts.execute(f"""SELECT COUNT(DISTINCT report_date) days,SUM(clicks) clicks,
+                      MIN(report_date) period_start,MAX(report_date) period_end,
                       SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders
                       FROM ppc_fact_clean WHERE {' AND '.join(clauses)}""",params).fetchone()
                     post=dict(result) if result else {}
@@ -149,6 +151,67 @@ def record_action_proposal(data):
         return cur.lastrowid, True
 
 
+def record_adjustment_proposal(intervention_id, new_value, objective):
+    """Create a manual follow-up without pretending that Amazon was changed."""
+    if new_value <= 0:
+        raise ValueError("The new bid must be greater than zero.")
+    with connect() as conn:
+        prior = conn.execute(
+            "SELECT rowid AS intervention_rowid,* FROM interventions WHERE rowid=?",
+            (intervention_id,),
+        ).fetchone()
+        if not prior or prior["intervention_type"] != "ppc_action":
+            raise ValueError("The PPC intervention was not found.")
+        if prior["status"] not in {"executed", "monitoring"}:
+            raise ValueError("Only an active executed change can be adjusted.")
+        duplicate = conn.execute(
+            """SELECT rowid FROM interventions
+               WHERE supersedes_intervention_id=? AND status IN ('proposed','approved')
+               ORDER BY rowid DESC LIMIT 1""",
+            (intervention_id,),
+        ).fetchone()
+        if duplicate:
+            return duplicate[0], False
+
+    start = date.fromisoformat(prior["executed_at"][:10]) + timedelta(days=1)
+    end = date.today()
+    baseline = {"clicks": 0, "spend": 0, "ad_sales": 0, "orders": 0, "acos": None}
+    analytics_path = os.getenv("LITET_DB_PATH")
+    if analytics_path and Path(analytics_path).exists():
+        with sqlite3.connect(analytics_path) as facts:
+            facts.row_factory = sqlite3.Row
+            clauses = ["brand=?", "campaign_name=?", "target=?", "report_date BETWEEN ? AND ?"]
+            params = [prior["brand"], prior["campaign_name"], prior["entity_name"],
+                      start.isoformat(), end.isoformat()]
+            if prior["ad_group_name"]:
+                clauses.append("ad_group_name=?"); params.append(prior["ad_group_name"])
+            if prior["match_type"]:
+                clauses.append("match_type=?"); params.append(prior["match_type"])
+            result = facts.execute(f"""SELECT MIN(report_date) period_start,MAX(report_date) period_end,
+              SUM(clicks) clicks,SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders
+              FROM ppc_fact_clean WHERE {' AND '.join(clauses)}""", params).fetchone()
+            if result and result["period_end"]:
+                start = date.fromisoformat(result["period_start"])
+                end = date.fromisoformat(result["period_end"])
+                baseline.update({key: result[key] or 0 for key in ("clicks", "spend", "ad_sales", "orders")})
+                baseline["acos"] = baseline["spend"] / baseline["ad_sales"] if baseline["ad_sales"] else None
+
+    with connect() as conn:
+        cur = conn.execute("""INSERT INTO interventions
+          (created_at,brand,asin,intervention_type,old_value,new_value,period_start,period_end,
+           objective,status,campaign_name,entity_type,entity_name,action_type,baseline_json,
+           external_status,ad_group_name,match_type,supersedes_intervention_id)
+          VALUES (CURRENT_TIMESTAMP,?,?, 'ppc_action', ?,?,?,?,?, 'proposed',?,?,?,?,?,
+                  'awaiting_mcp_approval',?,?,?)""", (
+            prior["brand"], prior["asin"], prior["new_value"], new_value,
+            start.isoformat(), end.isoformat(), objective,
+            prior["campaign_name"], prior["entity_type"], prior["entity_name"],
+            "manual_bid_adjustment", json.dumps(baseline, sort_keys=True),
+            prior["ad_group_name"], prior["match_type"], intervention_id,
+        ))
+        return cur.lastrowid, True
+
+
 def update_intervention_status(intervention_id, status):
     allowed={"approved","executed","monitoring","dismissed","reverted","completed"}
     if status not in allowed:
@@ -167,3 +230,13 @@ def update_intervention_status(intervention_id, status):
     with connect() as conn:
         conn.execute(f"UPDATE interventions SET {assignments} WHERE rowid=?",
                      (*updates.values(),intervention_id))
+        if status == "executed":
+            prior = conn.execute(
+                "SELECT supersedes_intervention_id FROM interventions WHERE rowid=?",
+                (intervention_id,),
+            ).fetchone()
+            if prior and prior[0]:
+                conn.execute("""UPDATE interventions
+                  SET status='completed',outcome=?
+                  WHERE rowid=? AND status IN ('executed','monitoring')""",
+                  (f"revised_by:{intervention_id}", prior[0]))

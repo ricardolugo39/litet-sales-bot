@@ -440,6 +440,42 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(response.status_code,200)
         self.assertIn(b"ready_for_mcp",response.data)
 
+    def test_executed_ppc_change_can_be_adjusted_and_superseded(self):
+        from decision_dashboard_v2.interventions import (
+            connect, record_action_proposal, update_intervention_status,
+        )
+        intervention_id, _ = record_action_proposal({
+            "brand":"Litet", "asin":"—", "campaign_name":"LITET Ranking Campaign",
+            "ad_group_name":"Rankings", "entity_type":"keyword",
+            "entity_name":"cycling socks", "match_type":"BROAD",
+            "action_type":"reduce_bid_30pct", "old_value":1.20, "new_value":.84,
+            "period_start":"2026-09-01", "period_end":"2026-09-06",
+            "objective":"Reduce waste", "baseline":{"spend":78.18,"clicks":54,
+            "orders":2,"ad_sales":54.98,"acos":1.42},
+        })
+        update_intervention_status(intervention_id,"approved")
+        update_intervention_status(intervention_id,"executed")
+        response=self.client.post(
+            f"/decisions/interventions/{intervention_id}/adjust",
+            data={"brand":"Litet","period":"2026-09-01|2026-09-17",
+                  "new_value":"1.00","objective":"Recover controlled traffic"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code,302)
+        with connect() as conn:
+            followup=conn.execute(
+                "SELECT rowid AS intervention_rowid,* FROM interventions WHERE supersedes_intervention_id=?",
+                (intervention_id,),
+            ).fetchone()
+        self.assertEqual(followup["status"],"proposed")
+        update_intervention_status(followup["intervention_rowid"],"approved")
+        update_intervention_status(followup["intervention_rowid"],"executed")
+        with connect() as conn:
+            prior=conn.execute("SELECT status,outcome FROM interventions WHERE rowid=?",
+                               (intervention_id,)).fetchone()
+        self.assertEqual(prior["status"],"completed")
+        self.assertEqual(prior["outcome"],f"revised_by:{followup['intervention_rowid']}")
+
     def test_pricing_case_uses_trailing_settled_history(self):
         response = self.client.get(
             "/decisions/pricing?brand=Litet&period=2026-08-01%7C2026-08-16&asin=B0DSCFMCQD"
