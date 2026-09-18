@@ -16,14 +16,14 @@ else:
 if __package__:
     from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                             market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                            ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
+                            ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
     from .interventions import (recent_interventions, record_action_proposal,
                                 record_adjustment_proposal, record_pricing_case,
                                 update_intervention_status)
 else:  # Supports `python app.py` from this directory.
     from analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                            market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                           ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
+                           ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
     from interventions import (recent_interventions, record_action_proposal,
                                record_adjustment_proposal, record_pricing_case,
                                update_intervention_status)
@@ -301,7 +301,8 @@ def decisions():
     _mark_interventions_in_workflow(playbook,interventions)
 
     ctx.update(actions=cases[:6],portfolio=portfolio,prior_period=portfolio["prior_period"],
-               interventions=interventions,playbook=playbook)
+               interventions=interventions,playbook=playbook,
+               change_impact=ppc_change_impact(ctx["brand"],interventions))
     return render_template("dashboard.html",**ctx)
 
 

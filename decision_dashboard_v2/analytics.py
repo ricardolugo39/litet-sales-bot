@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from statistics import median
 from pathlib import Path
 
@@ -1066,6 +1066,136 @@ def ppc_organic_trend(brand):
             "analysis_start":complete[0]["month"] if complete else None,
             "analysis_end":complete[-1]["month"] if complete else None,
             "definition":"Non-ad proxy = total ordered units minus PPC-attributed units. Amazon attribution windows and seasonality can create timing noise."}
+
+
+def ppc_change_impact(brand, interventions, timeline_days=30):
+    """Brand-level result of the latest executed PPC change wave."""
+    executed = [row for row in interventions
+                if row.get("executed_at") and row.get("status") in
+                {"executed", "monitoring", "completed", "reverted"}]
+    if brand == "All" or not executed:
+        return None
+    latest_change = max(date.fromisoformat(row["executed_at"][:10]) for row in executed)
+    wave = [row for row in executed
+            if date.fromisoformat(row["executed_at"][:10]) == latest_change]
+    with connect() as conn:
+        freshness = conn.execute("""SELECT
+          (SELECT MAX(substr(o."purchase-date",1,10)) FROM orders o
+             JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
+             WHERE p.canonical_brand=?) latest_order,
+          (SELECT MAX(report_date) FROM ppc_fact_clean WHERE brand=?) latest_ppc,
+          (SELECT MAX(t.period_end) FROM business_traffic t
+             JOIN dim_product p ON p.asin=t.child_asin AND p.is_current=1
+             WHERE p.canonical_brand=?) latest_traffic""", (brand, brand, brand)).fetchone()
+        available = [date.fromisoformat(value) for value in freshness if value]
+        if not available:
+            return None
+        latest_complete = min(available)
+        timeline_start = max(latest_complete - timedelta(days=timeline_days - 1),
+                             latest_change.replace(day=1))
+        orders = conn.execute("""SELECT substr(o."purchase-date",1,10) day,
+          SUM(CAST(o.quantity AS REAL)) packages,
+          SUM(CAST(o.quantity AS REAL)*p.units_per_sellable_unit) pairs,
+          SUM(CAST(o."item-price" AS REAL)-COALESCE(CAST(o."item-promotion-discount" AS REAL),0)) sales
+          FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
+          WHERE p.canonical_brand=? AND substr(o."purchase-date",1,10) BETWEEN ? AND ?
+            AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
+            AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')
+          GROUP BY 1""", (brand, timeline_start.isoformat(), latest_complete.isoformat())).fetchall()
+        ads = conn.execute("""SELECT report_date day,SUM(spend) spend,SUM(ad_units) ad_units
+          FROM ppc_fact_clean WHERE brand=? AND report_date BETWEEN ? AND ? GROUP BY 1""",
+          (brand, timeline_start.isoformat(), latest_complete.isoformat())).fetchall()
+        traffic = conn.execute("""WITH snapshots AS (
+          SELECT t.period_start,t.period_end,t.child_asin,MAX(t.sessions_total) sessions,
+                 SUM(t.units_ordered) units
+          FROM business_traffic t JOIN dim_product p ON p.asin=t.child_asin AND p.is_current=1
+          WHERE p.canonical_brand=? AND t.period_start=? AND t.period_end<=?
+          GROUP BY t.period_start,t.period_end,t.child_asin)
+          SELECT period_start,period_end,SUM(sessions) sessions,SUM(units) units
+          FROM snapshots GROUP BY period_start,period_end ORDER BY period_end""",
+          (brand, latest_complete.replace(day=1).isoformat(), latest_complete.isoformat())).fetchall()
+
+    daily = {}
+    cursor = timeline_start
+    while cursor <= latest_complete:
+        daily[cursor.isoformat()] = {"day": cursor.isoformat(), "packages": 0, "pairs": 0,
+                                     "sales": 0, "spend": 0, "ad_units": 0,
+                                     "sessions": None, "traffic_units": None}
+        cursor += timedelta(days=1)
+    for row in orders:
+        if row["day"] in daily:
+            daily[row["day"]].update(packages=row["packages"] or 0, pairs=row["pairs"] or 0,
+                                      sales=row["sales"] or 0)
+    for row in ads:
+        if row["day"] in daily:
+            daily[row["day"]].update(spend=row["spend"] or 0, ad_units=row["ad_units"] or 0)
+    previous_sessions = previous_units = 0
+    previous_end = latest_complete.replace(day=1) - timedelta(days=1)
+    for row in traffic:
+        period_end = date.fromisoformat(row["period_end"])
+        span = max((period_end - previous_end).days, 1)
+        session_rate = max((row["sessions"] or 0) - previous_sessions, 0) / span
+        unit_rate = max((row["units"] or 0) - previous_units, 0) / span
+        cursor = previous_end + timedelta(days=1)
+        while cursor <= period_end:
+            if cursor.isoformat() in daily:
+                daily[cursor.isoformat()].update(sessions=session_rate, traffic_units=unit_rate)
+            cursor += timedelta(days=1)
+        previous_sessions, previous_units, previous_end = row["sessions"] or 0, row["units"] or 0, period_end
+
+    rows = list(daily.values())
+    marker_dates = {date.fromisoformat(row["executed_at"][:10]).isoformat() for row in executed}
+    max_pairs = max((row["pairs"] for row in rows), default=1) or 1
+    max_spend = max((row["spend"] for row in rows), default=1) or 1
+    max_sessions = max((row["sessions"] or 0 for row in rows), default=1) or 1
+    for row in rows:
+        row["pair_height"] = row["pairs"] / max_pairs * 100
+        row["spend_height"] = row["spend"] / max_spend * 100
+        row["traffic_height"] = (row["sessions"] or 0) / max_sessions * 100
+        row["conversion"] = ((row["traffic_units"] or 0) / row["sessions"]
+                             if row["sessions"] else None)
+        row["conversion_height"] = min((row["conversion"] or 0) * 500, 100)
+        row["is_change"] = row["day"] in marker_dates
+
+    def summarize(start, end):
+        selected = [row for row in rows if start <= date.fromisoformat(row["day"]) <= end]
+        days = len(selected)
+        if not days:
+            return None
+        sales = sum(row["sales"] for row in selected)
+        spend = sum(row["spend"] for row in selected)
+        sessions = sum(row["sessions"] or 0 for row in selected)
+        traffic_units = sum(row["traffic_units"] or 0 for row in selected)
+        return {"start":start.isoformat(), "end":end.isoformat(), "days":days,
+                "pairs_per_day":sum(row["pairs"] for row in selected)/days,
+                "sales_per_day":sales/days, "spend_per_day":spend/days,
+                "tacos":spend/sales if sales else None, "sessions_per_day":sessions/days,
+                "conversion":traffic_units/sessions if sessions else None,
+                "non_ad_packages_per_day":sum(max(row["packages"]-row["ad_units"],0) for row in selected)/days}
+    before = summarize(latest_change-timedelta(days=7), latest_change-timedelta(days=1))
+    post_end = min(latest_complete, latest_change+timedelta(days=7))
+    after = summarize(latest_change+timedelta(days=1), post_end) if post_end > latest_change else None
+    if not before or not after:
+        verdict, verdict_class, reason = "Not enough evidence", "warn", "A complete before/after comparison is not available yet."
+    else:
+        pair_change = after["pairs_per_day"] / before["pairs_per_day"] - 1 if before["pairs_per_day"] else None
+        tacos_change = after["tacos"] - before["tacos"] if after["tacos"] is not None and before["tacos"] is not None else None
+        if after["days"] < 7:
+            verdict, verdict_class = "Early read", "warn"
+            reason = f"Only {after['days']} complete post-change days are available; direction is visible but not confirmed."
+        elif pair_change is not None and pair_change < -.15:
+            verdict, verdict_class, reason = "Not working overall", "bad", "Physical-pair sales fell more than 15% after the change wave."
+        elif tacos_change is not None and tacos_change < 0 and (pair_change is None or pair_change >= -.10):
+            verdict, verdict_class, reason = "Improving overall", "good", "TaCoS improved without a material loss of physical-pair sales."
+        else:
+            verdict, verdict_class, reason = "Mixed result", "warn", "Efficiency and demand did not improve together."
+        for metric in ("pairs_per_day", "sales_per_day", "spend_per_day", "sessions_per_day",
+                       "conversion", "tacos", "non_ad_packages_per_day"):
+            base = before.get(metric)
+            after[f"{metric}_change"] = after.get(metric)/base-1 if base not in (None,0) and after.get(metric) is not None else None
+    return {"change_date":latest_change.isoformat(), "change_count":len(wave),
+            "latest_complete":latest_complete.isoformat(), "before":before, "after":after,
+            "days":rows, "verdict":verdict, "verdict_class":verdict_class, "reason":reason}
 
 
 def keyword_opportunities(period_start, period_end, brand):
