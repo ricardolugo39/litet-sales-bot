@@ -37,6 +37,110 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"09/26 MTD", response.data)
         self.assertIn(b"Monthly ordered sales ($) + TaCoS (%)", response.data)
 
+    def test_prime_event_uses_all_litet_sales_and_applies_event_fees(self):
+        from decision_dashboard_v2.analytics import prime_big_deals_performance
+
+        database = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        database.close()
+        try:
+            with sqlite3.connect(database.name) as conn:
+                conn.executescript("""
+                    CREATE TABLE dim_product (
+                      asin TEXT, canonical_brand TEXT, canonical_product_name TEXT,
+                      color TEXT, size TEXT, pack_type TEXT
+                    );
+                    CREATE TABLE orders (
+                      "amazon-order-id" TEXT, asin TEXT, "purchase-date" TEXT,
+                      quantity REAL, "item-price" REAL,
+                      "item-promotion-discount" REAL,
+                      "order-status" TEXT, "item-status" TEXT
+                    );
+                    CREATE TABLE sales_profitability (
+                      order_id TEXT, asin TEXT, sale_date TEXT, brand TEXT,
+                      cogs_amount REAL, amazon_fees REAL,
+                      cogs_status TEXT, fee_status TEXT
+                    );
+                    CREATE TABLE ppc_fact_clean (
+                      report_date TEXT, brand TEXT, spend REAL, ad_sales REAL
+                    );
+                    INSERT INTO dim_product VALUES
+                      ('L1','Litet','Litet one','White','M','single'),
+                      ('L2','Litet','Litet two','Black','L','3-pack'),
+                      ('H1','Has10','Has10 item','Orange',NULL,'single');
+                    INSERT INTO orders VALUES
+                      ('O1','L1','2026-10-06T08:30:00+00:00',2,100,10,'Shipped','Shipped'),
+                      ('O2','L2','2026-10-07T19:00:00+00:00',1,60,0,'Shipped','Shipped'),
+                      ('O3','H1','2026-10-06T10:00:00+00:00',1,500,0,'Shipped','Shipped'),
+                      ('O4','L1','2026-10-08T00:01:00+00:00',1,999,0,'Shipped','Shipped'),
+                      ('O5','L1','2026-10-06T09:00:00+00:00',1,50,0,'Cancelled','Cancelled');
+                    INSERT INTO sales_profitability VALUES
+                      ('O1','L1','2026-10-06','Litet',40,-20,'available','exact_order_fee_allocated'),
+                      ('O2','L2','2026-10-07','Litet',15,-10,'available','exact_order_fee_allocated');
+                    INSERT INTO ppc_fact_clean VALUES
+                      ('2026-10-06','Litet',12,30),
+                      ('2026-10-07','Litet',8,20),
+                      ('2026-10-06','Has10',200,400);
+                """)
+            with patch.dict(os.environ, {"LITET_DB_PATH": database.name}):
+                result = prime_big_deals_performance()
+                response = self.client.get("/events/prime-big-deals-2026")
+            self.assertEqual(result["sales"], 150)
+            self.assertEqual(result["discounts"], 10)
+            self.assertEqual(result["units"], 3)
+            self.assertEqual(result["orders"], 2)
+            self.assertEqual(result["ad_spend"], 20)
+            self.assertAlmostEqual(result["variable_fee"], 2.25)
+            self.assertAlmostEqual(result["deal_fee"], 102.25)
+            self.assertAlmostEqual(result["profit"], -57.25)
+            self.assertAlmostEqual(result["roi"], -57.25 / 102.25)
+            self.assertTrue(result["complete"])
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Prime Big Deal Days", response.data)
+            self.assertIn(b"5490b198-4bcc-49f7-add2-8099c6da5c3c", response.data)
+            self.assertIn(b"-$57.25", response.data)
+        finally:
+            os.unlink(database.name)
+
+    def test_prime_event_withholds_profit_when_exact_fees_are_missing(self):
+        from decision_dashboard_v2.analytics import prime_big_deals_performance
+
+        database = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        database.close()
+        try:
+            with sqlite3.connect(database.name) as conn:
+                conn.executescript("""
+                    CREATE TABLE dim_product (
+                      asin TEXT, canonical_brand TEXT, canonical_product_name TEXT,
+                      color TEXT, size TEXT, pack_type TEXT
+                    );
+                    CREATE TABLE orders (
+                      "amazon-order-id" TEXT, asin TEXT, "purchase-date" TEXT,
+                      quantity REAL, "item-price" REAL,
+                      "item-promotion-discount" REAL,
+                      "order-status" TEXT, "item-status" TEXT
+                    );
+                    CREATE TABLE sales_profitability (
+                      order_id TEXT, asin TEXT, sale_date TEXT, brand TEXT,
+                      cogs_amount REAL, amazon_fees REAL,
+                      cogs_status TEXT, fee_status TEXT
+                    );
+                    CREATE TABLE ppc_fact_clean (
+                      report_date TEXT, brand TEXT, spend REAL, ad_sales REAL
+                    );
+                    INSERT INTO dim_product VALUES
+                      ('L1','Litet','Litet one','White','M','single');
+                    INSERT INTO orders VALUES
+                      ('O1','L1','2026-10-06',1,100,10,'Shipped','Shipped');
+                """)
+            with patch.dict(os.environ, {"LITET_DB_PATH": database.name}):
+                result = prime_big_deals_performance()
+            self.assertFalse(result["complete"])
+            self.assertIsNone(result["profit"])
+            self.assertIsNone(result["roi"])
+            self.assertEqual(result["deal_fee"], 101.35)
+        finally:
+            os.unlink(database.name)
+
     def test_current_mtd_uses_latest_available_settled_pnl(self):
         response = self.client.get(
             "/?brand=Litet&period=2026-09-01%7C2026-09-04"

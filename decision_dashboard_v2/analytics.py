@@ -31,6 +31,165 @@ def connect():
     return conn
 
 
+PRIME_BIG_DEALS_START = "2026-10-06"
+PRIME_BIG_DEALS_END = "2026-10-07"
+PRIME_BIG_DEALS_UPFRONT_FEE = 100.0
+PRIME_BIG_DEALS_VARIABLE_RATE = 0.015
+PRIME_BIG_DEALS_VARIABLE_CAP = 5000.0
+
+
+def prime_big_deals_performance():
+    """Return the LITET-only event P&L using the report's recorded dates.
+
+    Amazon order fees are recognized only when the exact order fee has reached
+    ``sales_profitability``.  Until COGS and fee coverage are complete, final
+    profit and ROI intentionally remain unavailable instead of treating missing
+    costs as zero.
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            WITH event_orders AS (
+              SELECT o."amazon-order-id" order_id, o.asin,
+                     date(substr(o."purchase-date",1,10)) sale_day,
+                     SUM(CAST(o.quantity AS REAL)) units,
+                     SUM(CAST(o."item-price" AS REAL)
+                         - COALESCE(CAST(o."item-promotion-discount" AS REAL),0)) sales,
+                     SUM(COALESCE(CAST(o."item-promotion-discount" AS REAL),0)) discount
+              FROM orders o
+              JOIN dim_product p ON p.asin=o.asin
+              WHERE date(substr(o."purchase-date",1,10)) BETWEEN ? AND ?
+                AND p.canonical_brand='Litet'
+                AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
+                AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')
+              GROUP BY o."amazon-order-id",o.asin,date(substr(o."purchase-date",1,10))
+            ), exact_costs AS (
+              SELECT order_id,asin,SUM(cogs_amount) cogs,SUM(amazon_fees) amazon_fees,
+                     MIN(CASE WHEN cogs_status='available' THEN 1 ELSE 0 END) cogs_ready,
+                     MIN(CASE WHEN fee_status='exact_order_fee_allocated' THEN 1 ELSE 0 END) fee_ready
+              FROM sales_profitability
+              WHERE date(sale_date) BETWEEN ? AND ? AND brand='Litet'
+              GROUP BY order_id,asin
+            )
+            SELECT e.*,p.canonical_product_name product_name,p.color,p.size,p.pack_type,
+                   c.cogs,c.amazon_fees,COALESCE(c.cogs_ready,0) cogs_ready,
+                   COALESCE(c.fee_ready,0) fee_ready
+            FROM event_orders e
+            JOIN dim_product p ON p.asin=e.asin
+            LEFT JOIN exact_costs c ON c.order_id=e.order_id AND c.asin=e.asin
+            ORDER BY e.sale_day,e.asin
+            """,
+            [PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END,
+             PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END],
+        ).fetchall()
+        ad_rows = conn.execute(
+            """SELECT report_date sale_day,SUM(spend) ad_spend,SUM(ad_sales) ad_sales
+               FROM ppc_fact_clean
+               WHERE brand='Litet' AND date(report_date) BETWEEN ? AND ?
+               GROUP BY report_date ORDER BY report_date""",
+            [PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END],
+        ).fetchall()
+
+    source = [dict(row) for row in rows]
+    sales = sum(row["sales"] or 0 for row in source)
+    units = sum(row["units"] or 0 for row in source)
+    order_count = len({row["order_id"] for row in source})
+    discounts = sum(row["discount"] or 0 for row in source)
+    cogs = sum(row["cogs"] or 0 for row in source)
+    amazon_fees = abs(sum(row["amazon_fees"] or 0 for row in source))
+    covered_sales_cogs = sum((row["sales"] or 0) for row in source if row["cogs_ready"])
+    covered_sales_fees = sum((row["sales"] or 0) for row in source if row["fee_ready"])
+    cogs_coverage = covered_sales_cogs / sales if sales else None
+    fee_coverage = covered_sales_fees / sales if sales else None
+    variable_fee = min(sales * PRIME_BIG_DEALS_VARIABLE_RATE,
+                       PRIME_BIG_DEALS_VARIABLE_CAP)
+    deal_fee = PRIME_BIG_DEALS_UPFRONT_FEE + variable_fee
+    ad_by_day = {row["sale_day"]: dict(row) for row in ad_rows}
+    ad_spend = sum(row["ad_spend"] or 0 for row in ad_rows)
+    ad_sales = sum(row["ad_sales"] or 0 for row in ad_rows)
+    last_order_date = max((row["sale_day"] for row in source), default=None)
+    last_ppc_date = max(ad_by_day, default=None)
+    ppc_current = bool(last_order_date and last_ppc_date
+                       and last_ppc_date >= last_order_date)
+    complete = (bool(sales) and cogs_coverage == 1 and fee_coverage == 1
+                and ppc_current)
+    profit = sales - cogs - amazon_fees - ad_spend - deal_fee if complete else None
+
+    def summarize(group_rows):
+        group_sales = sum(row["sales"] or 0 for row in group_rows)
+        share = group_sales / sales if sales else 0
+        group_cogs = sum(row["cogs"] or 0 for row in group_rows)
+        group_amazon_fees = abs(sum(row["amazon_fees"] or 0 for row in group_rows))
+        group_ready = bool(group_sales) and all(
+            row["cogs_ready"] and row["fee_ready"] for row in group_rows
+        )
+        allocated_upfront = PRIME_BIG_DEALS_UPFRONT_FEE * share
+        group_variable = variable_fee * share
+        contribution = (group_sales - group_cogs - group_amazon_fees
+                        - allocated_upfront - group_variable) if group_ready else None
+        return {
+            "sales": group_sales,
+            "units": sum(row["units"] or 0 for row in group_rows),
+            "orders": len({row["order_id"] for row in group_rows}),
+            "discounts": sum(row["discount"] or 0 for row in group_rows),
+            "cogs": group_cogs,
+            "amazon_fees": group_amazon_fees,
+            "upfront_fee": allocated_upfront,
+            "variable_fee": group_variable,
+            "contribution_before_ppc": contribution,
+            "costs_ready": group_ready,
+        }
+
+    daily = []
+    for event_day in (PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END):
+        item = summarize([row for row in source if row["sale_day"] == event_day])
+        item.update(sale_day=event_day,
+                    ad_spend=(ad_by_day.get(event_day) or {}).get("ad_spend", 0),
+                    ad_sales=(ad_by_day.get(event_day) or {}).get("ad_sales", 0))
+        daily.append(item)
+
+    products = []
+    for asin in sorted({row["asin"] for row in source}):
+        group = [row for row in source if row["asin"] == asin]
+        item = summarize(group)
+        item.update(asin=asin, product_name=group[0]["product_name"],
+                    color=group[0]["color"], size=group[0]["size"],
+                    pack_type=group[0]["pack_type"])
+        products.append(item)
+    products.sort(key=lambda row: row["sales"], reverse=True)
+
+    return {
+        "promotion_id": "5490b198-4bcc-49f7-add2-8099c6da5c3c",
+        "start": PRIME_BIG_DEALS_START,
+        "end": PRIME_BIG_DEALS_END,
+        "sales": sales,
+        "units": units,
+        "orders": order_count,
+        "discounts": discounts,
+        "average_order_value": sales / order_count if order_count else None,
+        "cogs": cogs,
+        "amazon_fees": amazon_fees,
+        "ad_spend": ad_spend,
+        "ad_sales": ad_sales,
+        "tacos": ad_spend / sales if sales else None,
+        "upfront_fee": PRIME_BIG_DEALS_UPFRONT_FEE,
+        "variable_fee": variable_fee,
+        "variable_fee_cap": PRIME_BIG_DEALS_VARIABLE_CAP,
+        "deal_fee": deal_fee,
+        "profit": profit,
+        "margin": profit / sales if profit is not None and sales else None,
+        "roi": profit / deal_fee if profit is not None and deal_fee else None,
+        "complete": complete,
+        "ppc_current": ppc_current,
+        "cogs_coverage": cogs_coverage,
+        "fee_coverage": fee_coverage,
+        "daily": daily,
+        "products": products,
+        "last_order_date": last_order_date,
+        "last_ppc_date": last_ppc_date,
+    }
+
+
 def helium_data():
     """Return the latest complete DB snapshot, with the curated file as fallback."""
     live = latest_snapshot(database_path())
@@ -180,15 +339,20 @@ def overview(period_start, period_end, brand):
     with connect() as conn:
         traffic = conn.execute(
             f"""
-            WITH period_asin_traffic AS (
+            WITH latest_traffic_periods AS (
+              SELECT period_start, MAX(period_end) AS period_end
+              FROM business_traffic
+              WHERE period_start>=? AND period_end<=?
+              GROUP BY period_start
+            ), period_asin_traffic AS (
               SELECT period_start, period_end, child_asin AS asin,
                      MAX(sessions_total) AS sessions,
                      MAX(page_views_total) AS page_views,
                      SUM(units_ordered) AS units,
                      SUM(ordered_product_sales) AS ordered_sales,
                      MAX(featured_offer_percentage) AS buy_box
-              FROM business_traffic
-              WHERE period_start>=? AND period_end<=?
+              FROM business_traffic t
+              JOIN latest_traffic_periods latest USING (period_start,period_end)
               GROUP BY period_start, period_end, child_asin
             ), asin_traffic AS (
               SELECT asin, SUM(sessions) sessions, SUM(page_views) page_views,
@@ -491,11 +655,17 @@ def product_diagnostics(period_start, period_end, brand):
     with connect() as conn:
         rows = conn.execute(
             f"""
-            WITH period_traffic AS (
+            WITH latest_traffic_periods AS (
+              SELECT period_start, MAX(period_end) AS period_end
+              FROM business_traffic
+              WHERE period_start>=? AND period_end<=?
+              GROUP BY period_start
+            ), period_traffic AS (
               SELECT period_start,period_end,child_asin asin, MAX(sessions_total) sessions,
                      SUM(units_ordered) units, SUM(ordered_product_sales) ordered_sales,
                      MAX(featured_offer_percentage) buy_box
-              FROM business_traffic WHERE period_start>=? AND period_end<=?
+              FROM business_traffic t
+              JOIN latest_traffic_periods latest USING (period_start,period_end)
               GROUP BY period_start,period_end,child_asin
             ), traffic AS (
               SELECT asin,SUM(sessions) sessions,SUM(units) units,SUM(ordered_sales) ordered_sales,AVG(buy_box) buy_box

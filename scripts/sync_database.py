@@ -49,6 +49,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", default=os.getenv("LITET_DB_PATH"))
     parser.add_argument("--url", default=os.getenv("DASHBOARD_URL"))
+    parser.add_argument(
+        "--inventory-url",
+        default=os.getenv("INVENTORY_APP_URL"),
+        help="Optional second app that consumes the same analytics snapshot",
+    )
     parser.add_argument("--cache", default=os.getenv("LITET_OFFLINE_CACHE", "offline_cache/litet.db"))
     args = parser.parse_args()
     token = os.getenv("ADMIN_UPLOAD_TOKEN")
@@ -63,6 +68,10 @@ def main():
         payload = Path(archive.name).read_bytes()
     with request(args.url, token, method="PUT", data=payload) as response:
         print("Uploaded:", json.load(response))
+
+    if args.inventory_url:
+        with request(args.inventory_url, token, method="PUT", data=payload) as response:
+            print("Inventory app uploaded:", json.load(response))
 
     cache = Path(args.cache).expanduser().resolve()
     cache.parent.mkdir(parents=True, exist_ok=True)

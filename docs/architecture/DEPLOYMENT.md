@@ -24,6 +24,7 @@ Required local synchronization variables:
 LITET_DB_PATH=/Users/.../Reports/SQLite/litet.db
 LITET_OFFLINE_CACHE=/Users/.../offline_cache/litet.db
 DASHBOARD_URL=https://<service>.up.railway.app
+INVENTORY_APP_URL=https://<inventory-service>.up.railway.app
 ADMIN_UPLOAD_TOKEN=<same value as Railway>
 ```
 
@@ -37,7 +38,9 @@ Keep real values in `.env`; never commit them.
 3. The established `update_all.py` pipeline imports the files and rebuilds PPC
    analytics.
 4. The synchronization command validates the complete SQLite database, sends a
-   gzip-compressed snapshot over HTTPS, and refreshes the offline cache.
+   gzip-compressed snapshot over HTTPS to the decision dashboard and, when
+   `INVENTORY_APP_URL` is set, to the inventory app, then refreshes the offline
+   cache.
 5. Railway validates the candidate database and atomically replaces the
    canonical file. Existing intervention records are copied into the candidate
    before replacement.

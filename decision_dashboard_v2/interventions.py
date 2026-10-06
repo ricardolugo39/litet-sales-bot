@@ -40,6 +40,14 @@ def connect():
     return conn
 
 
+def _keyword_family(value):
+    """Normalize simple singular/plural variants without merging broad synonyms."""
+    words = []
+    for word in (value or "").strip().lower().split():
+        words.append(word[:-1] if len(word) > 3 and word.endswith("s") else word)
+    return " ".join(words)
+
+
 def record_pricing_case(data):
     with connect() as conn:
         cur = conn.execute("""INSERT INTO interventions
@@ -70,22 +78,77 @@ def recent_interventions(limit=20):
                 if row.get("executed_at"):
                     start=date.fromisoformat(row["executed_at"][:10])+timedelta(days=1)
                     end=min(date.today(),start+timedelta(days=13))
+                    # Do not attribute results from a later bid regime to this one.
+                    # With daily facts, the old regime ends on the next execution
+                    # date and the new regime begins measuring the following day.
+                    with connect() as log:
+                        next_change=log.execute("""SELECT executed_at,new_value
+                          FROM interventions
+                          WHERE intervention_type='ppc_action' AND executed_at>?
+                            AND brand=? AND campaign_name=? AND entity_name=?
+                            AND COALESCE(ad_group_name,'')=COALESCE(?,'')
+                            AND COALESCE(match_type,'')=COALESCE(?,'')
+                            AND status IN ('executed','monitoring','completed','reverted')
+                          ORDER BY executed_at LIMIT 1""",(
+                            row["executed_at"],row["brand"],row.get("campaign_name"),
+                            row.get("entity_name"),row.get("ad_group_name"),
+                            row.get("match_type"),
+                        )).fetchone()
+                    if next_change:
+                        end=min(end,date.fromisoformat(next_change["executed_at"][:10]))
+                        row["superseded_by"]={"executed_at":next_change["executed_at"],
+                                              "new_value":next_change["new_value"]}
+                    coverage=facts.execute("""SELECT COUNT(DISTINCT report_date) days,
+                      MIN(report_date) period_start,MAX(report_date) period_end
+                      FROM ppc_fact_clean
+                      WHERE brand=? AND report_date BETWEEN ? AND ?""",
+                      (row["brand"],start.isoformat(),end.isoformat())).fetchone()
+                    row["post_coverage"]=dict(coverage) if coverage else {}
                     clauses=["brand=?","campaign_name=?","target=?","report_date BETWEEN ? AND ?"]
                     params=[row["brand"],row.get("campaign_name"),row.get("entity_name"),start.isoformat(),end.isoformat()]
                     if row.get("ad_group_name"):
                         clauses.append("ad_group_name=?"); params.append(row["ad_group_name"])
                     if row.get("match_type"):
                         clauses.append("match_type=?"); params.append(row["match_type"])
-                    result=facts.execute(f"""SELECT COUNT(DISTINCT report_date) days,SUM(clicks) clicks,
+                    result=facts.execute(f"""SELECT COUNT(DISTINCT report_date) active_days,
+                      SUM(impressions) impressions,SUM(clicks) clicks,
                       MIN(report_date) period_start,MAX(report_date) period_end,
                       SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders
                       FROM ppc_fact_clean WHERE {' AND '.join(clauses)}""",params).fetchone()
                     post=dict(result) if result else {}
-                    if post.get("days"):
+                    coverage_days=row["post_coverage"].get("days") or 0
+                    post["days"]=coverage_days
+                    post["has_activity"]=bool(post.get("active_days"))
+                    for metric in ("impressions","clicks","spend","ad_sales","orders"):
+                        post[metric]=post.get(metric) or 0
+                    if coverage_days:
                         post["acos"]=post["spend"]/post["ad_sales"] if post.get("ad_sales") else None
                         post["cpc"]=post["spend"]/post["clicks"] if post.get("clicks") else None
-                        post["spend_per_day"]=post["spend"]/post["days"]
-                        post["orders_per_day"]=post["orders"]/post["days"]
+                        post["spend_per_day"]=post["spend"]/coverage_days
+                        post["orders_per_day"]=post["orders"]/coverage_days
+
+                        related=facts.execute("""SELECT target,match_type,
+                          SUM(impressions) impressions,SUM(clicks) clicks,SUM(spend) spend,
+                          SUM(ad_sales) ad_sales,SUM(ad_orders) orders
+                          FROM ppc_fact_clean
+                          WHERE brand=? AND campaign_name=? AND ad_group_name=?
+                            AND report_date BETWEEN ? AND ? AND target<>?
+                          GROUP BY target,match_type""",(
+                            row["brand"],row.get("campaign_name"),row.get("ad_group_name"),
+                            start.isoformat(),end.isoformat(),row.get("entity_name"),
+                        )).fetchall() if row.get("ad_group_name") else []
+                        family=_keyword_family(row.get("entity_name"))
+                        related=[dict(item) for item in related
+                                 if _keyword_family(item["target"]) == family]
+                        if related:
+                            row["related_post"]={
+                                "targets":related,
+                                "impressions":sum(item["impressions"] or 0 for item in related),
+                                "clicks":sum(item["clicks"] or 0 for item in related),
+                                "spend":sum(item["spend"] or 0 for item in related),
+                                "ad_sales":sum(item["ad_sales"] or 0 for item in related),
+                                "orders":sum(item["orders"] or 0 for item in related),
+                            }
                     row["post"]=post
     for row in rows:
         # Some early Railway records inherited a nullable legacy id column.
@@ -103,7 +166,13 @@ def recent_interventions(limit=20):
             base_acos=row["baseline"].get("acos")
             base_orders=row["baseline"].get("orders_per_day") or 0
             order_ratio=post["orders_per_day"]/base_orders if base_orders else None
-            if post["days"]<7:
+            if not post.get("has_activity") and row.get("related_post",{}).get("impressions"):
+                row["result_signal"]="Exact target was inactive; traffic appeared on a related keyword"
+                row["result_class"]="warn"
+            elif not post.get("has_activity"):
+                row["result_signal"]="No activity recorded for the exact target; account PPC data is loaded"
+                row["result_class"]="warn"
+            elif post["days"]<7:
                 row["result_signal"]="Early read — wait for 7 complete days"
                 row["result_class"]="warn"
             elif post.get("acos") is not None and base_acos is not None and post["acos"]<base_acos and (order_ratio is None or order_ratio>=.8):

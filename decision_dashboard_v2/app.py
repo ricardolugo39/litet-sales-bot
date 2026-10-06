@@ -16,14 +16,14 @@ else:
 if __package__:
     from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                             market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                            ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
+                            ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
     from .interventions import (recent_interventions, record_action_proposal,
                                 record_adjustment_proposal, record_pricing_case,
                                 update_intervention_status)
 else:  # Supports `python app.py` from this directory.
     from analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                            market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                           ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, product_diagnostics, product_portfolio)
+                           ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
     from interventions import (recent_interventions, record_action_proposal,
                                record_adjustment_proposal, record_pricing_case,
                                update_intervention_status)
@@ -289,6 +289,13 @@ def ppc():
     ctx.update(ppc_rows=ppc_decisions(start,end,brand),advertising=advertising_detail(start,end,brand),organic_trend=ppc_organic_trend(brand),playbook=playbook,keyword_opportunities=keyword_opportunities(start,end,brand))
     return render_template("dashboard.html",**ctx)
 
+
+@app.get("/events/prime-big-deals-2026")
+def prime_big_deals():
+    return render_template("prime_big_deals.html",
+                           page="prime_big_deals",
+                           event=prime_big_deals_performance())
+
 @app.get("/decisions")
 def decisions():
     ctx=common("decisions"); portfolio=product_portfolio(ctx["start"],ctx["end"],ctx["brand"])
@@ -297,11 +304,15 @@ def decisions():
     cases.sort(key=lambda row: (0 if row["is_ppc_hero"] else 1 if row["is_ppc_test_candidate"] else 2,
                                 row["status_rank"], -(row["ordered_sales"] or 0)))
     interventions=_interventions_for_brand(recent_interventions(),ctx["brand"])
+    current_interventions, intervention_history, intervention_summary = _intervention_rollup(interventions)
     playbook=keyword_playbook(ctx["start"],ctx["end"],ctx["brand"])
     _mark_interventions_in_workflow(playbook,interventions)
 
     ctx.update(actions=cases[:6],portfolio=portfolio,prior_period=portfolio["prior_period"],
                interventions=interventions,playbook=playbook,
+               current_interventions=current_interventions,
+               intervention_history=intervention_history,
+               intervention_summary=intervention_summary,
                change_impact=ppc_change_impact(ctx["brand"],interventions))
     return render_template("dashboard.html",**ctx)
 
@@ -321,6 +332,35 @@ def _interventions_for_brand(interventions,brand):
     if brand == "All":
         return interventions
     return [item for item in interventions if item.get("brand") == brand]
+
+
+def _intervention_rollup(interventions):
+    """Show one current result per exact target; keep superseded runs as history."""
+    result_statuses={"executed","monitoring","completed","reverted"}
+    current=[]
+    history=[]
+    seen=set()
+    for item in interventions:
+        if item.get("status") not in result_statuses:
+            continue
+        key=(item.get("brand"),item.get("campaign_name"),item.get("ad_group_name"),
+             item.get("entity_name"),item.get("match_type"))
+        if key in seen:
+            history.append(item)
+        else:
+            seen.add(key)
+            current.append(item)
+    summary={"working":0,"not_working":0,"watch":0,"waiting":0}
+    for item in current:
+        if not (item.get("post") or {}).get("days"):
+            summary["waiting"]+=1
+        elif item.get("result_class")=="good":
+            summary["working"]+=1
+        elif item.get("result_class")=="bad":
+            summary["not_working"]+=1
+        else:
+            summary["watch"]+=1
+    return current,history,summary
 
 @app.get("/decisions/pricing")
 def pricing():
