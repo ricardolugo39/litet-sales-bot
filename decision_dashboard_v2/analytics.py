@@ -85,7 +85,9 @@ def prime_big_deals_performance():
         ad_rows = conn.execute(
             """SELECT report_date sale_day,SUM(spend) ad_spend,SUM(ad_sales) ad_sales
                FROM ppc_fact_clean
-               WHERE brand='Litet' AND date(report_date) BETWEEN ? AND ?
+               WHERE brand='Litet'
+                 AND lower(campaign_name) LIKE '%litet%'
+                 AND date(report_date) BETWEEN ? AND ?
                GROUP BY report_date ORDER BY report_date""",
             [PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END],
         ).fetchall()

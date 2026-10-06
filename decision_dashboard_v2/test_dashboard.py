@@ -61,7 +61,8 @@ class DashboardTest(unittest.TestCase):
                       cogs_status TEXT, fee_status TEXT
                     );
                     CREATE TABLE ppc_fact_clean (
-                      report_date TEXT, brand TEXT, spend REAL, ad_sales REAL
+                      report_date TEXT, campaign_name TEXT, brand TEXT,
+                      spend REAL, ad_sales REAL
                     );
                     INSERT INTO dim_product VALUES
                       ('L1','Litet','Litet one','White','M','single'),
@@ -77,9 +78,10 @@ class DashboardTest(unittest.TestCase):
                       ('O1','L1','2026-10-06','Litet',40,-20,'available','exact_order_fee_allocated'),
                       ('O2','L2','2026-10-07','Litet',15,-10,'available','exact_order_fee_allocated');
                     INSERT INTO ppc_fact_clean VALUES
-                      ('2026-10-06','Litet',12,30),
-                      ('2026-10-07','Litet',8,20),
-                      ('2026-10-06','Has10',200,400);
+                      ('2026-10-06','LITET ranking','Litet',12,30),
+                      ('2026-10-07','Litet discovery','Litet',8,20),
+                      ('2026-10-06','Has10 exact','Has10',200,400),
+                      ('2026-10-06','Has10 mislabeled','Litet',300,600);
                 """)
             with patch.dict(os.environ, {"LITET_DB_PATH": database.name}):
                 result = prime_big_deals_performance()
@@ -125,7 +127,8 @@ class DashboardTest(unittest.TestCase):
                       cogs_status TEXT, fee_status TEXT
                     );
                     CREATE TABLE ppc_fact_clean (
-                      report_date TEXT, brand TEXT, spend REAL, ad_sales REAL
+                      report_date TEXT, campaign_name TEXT, brand TEXT,
+                      spend REAL, ad_sales REAL
                     );
                     INSERT INTO dim_product VALUES
                       ('L1','Litet','Litet one','White','M','single');
