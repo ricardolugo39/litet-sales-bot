@@ -222,9 +222,14 @@ def prime_big_deals_performance():
     daily = []
     for event_day in (PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END):
         item = summarize([row for row in source if row["sale_day"] == event_day])
-        item.update(sale_day=event_day,
-                    ad_spend=(ad_by_day.get(event_day) or {}).get("ad_spend", 0),
-                    ad_sales=(ad_by_day.get(event_day) or {}).get("ad_sales", 0))
+        daily_ad_spend = (ad_by_day.get(event_day) or {}).get("ad_spend", 0)
+        item.update(
+            sale_day=event_day,
+            ad_spend=daily_ad_spend,
+            ad_sales=(ad_by_day.get(event_day) or {}).get("ad_sales", 0),
+            profit_after_ppc=(item["contribution_before_ppc"]-daily_ad_spend
+                              if item["contribution_before_ppc"] is not None else None),
+        )
         daily.append(item)
 
     products = []

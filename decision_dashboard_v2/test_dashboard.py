@@ -109,11 +109,16 @@ class DashboardTest(unittest.TestCase):
             self.assertAlmostEqual(result["deal_fee"], 102.25)
             self.assertAlmostEqual(result["profit"], -57.25)
             self.assertAlmostEqual(result["roi"], -57.25 / 102.25)
+            self.assertAlmostEqual(
+                sum(day["profit_after_ppc"] for day in result["daily"]),
+                result["profit"],
+            )
             self.assertTrue(result["complete"])
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Prime Big Deal Days", response.data)
             self.assertIn(b"5490b198-4bcc-49f7-add2-8099c6da5c3c", response.data)
             self.assertIn(b"-$57.25", response.data)
+            self.assertIn(b"Profit after PPC", response.data)
         finally:
             os.unlink(database.name)
 
