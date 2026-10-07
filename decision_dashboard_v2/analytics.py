@@ -38,6 +38,15 @@ PRIME_BIG_DEALS_VARIABLE_RATE = 0.015
 PRIME_BIG_DEALS_VARIABLE_CAP = 5000.0
 
 
+def clothing_referral_fee(sales, units):
+    """US Clothing referral fee using discounted per-unit sales price."""
+    if not units:
+        return 0.0, None
+    unit_price = sales / units
+    rate = .05 if unit_price <= 15 else .10 if unit_price <= 20 else .17
+    return max(sales * rate, units * .30), rate
+
+
 def prime_big_deals_performance():
     """Return the LITET-only event P&L using the report's recorded dates.
 
@@ -64,23 +73,46 @@ def prime_big_deals_performance():
                 AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')
               GROUP BY o."amazon-order-id",o.asin,date(substr(o."purchase-date",1,10))
             ), exact_costs AS (
-              SELECT order_id,asin,SUM(cogs_amount) cogs,SUM(amazon_fees) amazon_fees,
-                     MIN(CASE WHEN cogs_status='available' THEN 1 ELSE 0 END) cogs_ready,
+              SELECT order_id,asin,SUM(amazon_fees) amazon_fees,
                      MIN(CASE WHEN fee_status='exact_order_fee_allocated' THEN 1 ELSE 0 END) fee_ready
               FROM sales_profitability
               WHERE date(sale_date) BETWEEN ? AND ? AND brand='Litet'
               GROUP BY order_id,asin
+            ), fee_components AS (
+              SELECT e.asin,
+                     ABS(SUM(e.fba_fulfillment_fees))
+                       / NULLIF(SUM(e.net_units_sold),0) fba_per_unit
+              FROM asin_economics e
+              JOIN dim_product p ON p.asin=e.asin
+              WHERE p.canonical_brand='Litet'
+                AND e.period_start=(SELECT MAX(x.period_start)
+                  FROM asin_economics x
+                  WHERE x.asin=e.asin AND x.period_end<?
+                    AND x.period_start LIKE '%-01'
+                    AND x.period_end=date(x.period_start,'+1 month','-1 day'))
+              GROUP BY e.asin
             )
             SELECT e.*,p.canonical_product_name product_name,p.color,p.size,p.pack_type,
-                   c.cogs,c.amazon_fees,COALESCE(c.cogs_ready,0) cogs_ready,
+                   e.units*(SELECT g.unit_cogs FROM cogs_ledger g
+                     WHERE g.asin=e.asin AND g.effective_start<=e.sale_day
+                       AND (g.effective_end IS NULL OR g.effective_end>e.sale_day)
+                     ORDER BY g.effective_start DESC LIMIT 1) cogs,
+                   c.amazon_fees exact_amazon_fees,
+                   f.fba_per_unit,
+                   CASE WHEN (SELECT g.unit_cogs FROM cogs_ledger g
+                     WHERE g.asin=e.asin AND g.effective_start<=e.sale_day
+                       AND (g.effective_end IS NULL OR g.effective_end>e.sale_day)
+                     ORDER BY g.effective_start DESC LIMIT 1) IS NOT NULL THEN 1 ELSE 0 END cogs_ready,
                    COALESCE(c.fee_ready,0) fee_ready
             FROM event_orders e
             JOIN dim_product p ON p.asin=e.asin
             LEFT JOIN exact_costs c ON c.order_id=e.order_id AND c.asin=e.asin
+            LEFT JOIN fee_components f ON f.asin=e.asin
             ORDER BY e.sale_day,e.asin
             """,
             [PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END,
-             PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END],
+             PRIME_BIG_DEALS_START, PRIME_BIG_DEALS_END,
+             PRIME_BIG_DEALS_START],
         ).fetchall()
         ad_rows = conn.execute(
             """SELECT report_date sale_day,SUM(spend) ad_spend,SUM(ad_sales) ad_sales
@@ -98,11 +130,37 @@ def prime_big_deals_performance():
     order_count = len({row["order_id"] for row in source})
     discounts = sum(row["discount"] or 0 for row in source)
     cogs = sum(row["cogs"] or 0 for row in source)
-    amazon_fees = abs(sum(row["amazon_fees"] or 0 for row in source))
+    for row in source:
+        if row["fee_ready"]:
+            row["amazon_fees"] = abs(row["exact_amazon_fees"] or 0)
+            row["normal_fixed_fee"] = None
+            row["normal_variable_fee"] = None
+            row["fee_method"] = "exact"
+        elif row["fba_per_unit"] is not None and row["units"]:
+            referral_fee, referral_rate = clothing_referral_fee(
+                row["sales"] or 0, row["units"]
+            )
+            row["normal_fixed_fee"] = (row["units"] or 0) * row["fba_per_unit"]
+            row["normal_variable_fee"] = referral_fee
+            row["referral_rate"] = referral_rate
+            row["amazon_fees"] = (row["normal_fixed_fee"]
+                                  + row["normal_variable_fee"])
+            row["fee_method"] = "estimated_asin_components"
+        else:
+            row["amazon_fees"] = 0
+            row["fee_method"] = "missing"
+    amazon_fees = sum(row["amazon_fees"] for row in source)
+    normal_fixed_fees = sum(row["normal_fixed_fee"] or 0 for row in source)
+    normal_variable_fees = sum(row["normal_variable_fee"] or 0 for row in source)
     covered_sales_cogs = sum((row["sales"] or 0) for row in source if row["cogs_ready"])
     covered_sales_fees = sum((row["sales"] or 0) for row in source if row["fee_ready"])
+    estimated_sales_fees = sum(
+        (row["sales"] or 0) for row in source
+        if row["fee_method"] == "estimated_asin_components"
+    )
     cogs_coverage = covered_sales_cogs / sales if sales else None
     fee_coverage = covered_sales_fees / sales if sales else None
+    estimated_fee_coverage = estimated_sales_fees / sales if sales else None
     variable_fee = min(sales * PRIME_BIG_DEALS_VARIABLE_RATE,
                        PRIME_BIG_DEALS_VARIABLE_CAP)
     deal_fee = PRIME_BIG_DEALS_UPFRONT_FEE + variable_fee
@@ -113,17 +171,21 @@ def prime_big_deals_performance():
     last_ppc_date = max(ad_by_day, default=None)
     ppc_current = bool(last_order_date and last_ppc_date
                        and last_ppc_date >= last_order_date)
-    complete = (bool(sales) and cogs_coverage == 1 and fee_coverage == 1
-                and ppc_current)
-    profit = sales - cogs - amazon_fees - ad_spend - deal_fee if complete else None
+    costs_ready = (bool(sales) and cogs_coverage == 1
+                   and abs((covered_sales_fees + estimated_sales_fees)-sales) < .01)
+    complete = costs_ready and ppc_current
+    profit_before_ppc = sales-cogs-amazon_fees-deal_fee if costs_ready else None
+    profit = profit_before_ppc-ad_spend if complete else None
 
     def summarize(group_rows):
         group_sales = sum(row["sales"] or 0 for row in group_rows)
         share = group_sales / sales if sales else 0
         group_cogs = sum(row["cogs"] or 0 for row in group_rows)
-        group_amazon_fees = abs(sum(row["amazon_fees"] or 0 for row in group_rows))
+        group_amazon_fees = sum(row["amazon_fees"] for row in group_rows)
+        group_fixed_fees = sum(row["normal_fixed_fee"] or 0 for row in group_rows)
+        group_variable_fees = sum(row["normal_variable_fee"] or 0 for row in group_rows)
         group_ready = bool(group_sales) and all(
-            row["cogs_ready"] and row["fee_ready"] for row in group_rows
+            row["cogs_ready"] and row["fee_method"] != "missing" for row in group_rows
         )
         allocated_upfront = PRIME_BIG_DEALS_UPFRONT_FEE * share
         group_variable = variable_fee * share
@@ -136,6 +198,8 @@ def prime_big_deals_performance():
             "discounts": sum(row["discount"] or 0 for row in group_rows),
             "cogs": group_cogs,
             "amazon_fees": group_amazon_fees,
+            "normal_fixed_fees": group_fixed_fees,
+            "normal_variable_fees": group_variable_fees,
             "upfront_fee": allocated_upfront,
             "variable_fee": group_variable,
             "contribution_before_ppc": contribution,
@@ -171,6 +235,8 @@ def prime_big_deals_performance():
         "average_order_value": sales / order_count if order_count else None,
         "cogs": cogs,
         "amazon_fees": amazon_fees,
+        "normal_fixed_fees": normal_fixed_fees,
+        "normal_variable_fees": normal_variable_fees,
         "ad_spend": ad_spend,
         "ad_sales": ad_sales,
         "tacos": ad_spend / sales if sales else None,
@@ -179,12 +245,16 @@ def prime_big_deals_performance():
         "variable_fee_cap": PRIME_BIG_DEALS_VARIABLE_CAP,
         "deal_fee": deal_fee,
         "profit": profit,
+        "profit_before_ppc": profit_before_ppc,
+        "roi_before_ppc": profit_before_ppc / deal_fee
+                          if profit_before_ppc is not None and deal_fee else None,
         "margin": profit / sales if profit is not None and sales else None,
         "roi": profit / deal_fee if profit is not None and deal_fee else None,
         "complete": complete,
         "ppc_current": ppc_current,
         "cogs_coverage": cogs_coverage,
         "fee_coverage": fee_coverage,
+        "estimated_fee_coverage": estimated_fee_coverage,
         "daily": daily,
         "products": products,
         "last_order_date": last_order_date,

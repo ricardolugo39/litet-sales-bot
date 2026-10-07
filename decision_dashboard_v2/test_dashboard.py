@@ -60,6 +60,16 @@ class DashboardTest(unittest.TestCase):
                       cogs_amount REAL, amazon_fees REAL,
                       cogs_status TEXT, fee_status TEXT
                     );
+                    CREATE TABLE cogs_ledger (
+                      asin TEXT, unit_cogs REAL, effective_start TEXT,
+                      effective_end TEXT
+                    );
+                    CREATE TABLE asin_economics (
+                      period_start TEXT, period_end TEXT, asin TEXT,
+                      net_sales REAL, net_units_sold REAL,
+                      fba_fulfillment_fees REAL, referral_fee REAL,
+                      referral_fee_refunds REAL
+                    );
                     CREATE TABLE ppc_fact_clean (
                       report_date TEXT, campaign_name TEXT, brand TEXT,
                       spend REAL, ad_sales REAL
@@ -77,6 +87,9 @@ class DashboardTest(unittest.TestCase):
                     INSERT INTO sales_profitability VALUES
                       ('O1','L1','2026-10-06','Litet',40,-20,'available','exact_order_fee_allocated'),
                       ('O2','L2','2026-10-07','Litet',15,-10,'available','exact_order_fee_allocated');
+                    INSERT INTO cogs_ledger VALUES
+                      ('L1',20,'2026-01-01',NULL),
+                      ('L2',15,'2026-01-01',NULL);
                     INSERT INTO ppc_fact_clean VALUES
                       ('2026-10-06','LITET ranking','Litet',12,30),
                       ('2026-10-07','Litet discovery','Litet',8,20),
@@ -126,6 +139,16 @@ class DashboardTest(unittest.TestCase):
                       cogs_amount REAL, amazon_fees REAL,
                       cogs_status TEXT, fee_status TEXT
                     );
+                    CREATE TABLE cogs_ledger (
+                      asin TEXT, unit_cogs REAL, effective_start TEXT,
+                      effective_end TEXT
+                    );
+                    CREATE TABLE asin_economics (
+                      period_start TEXT, period_end TEXT, asin TEXT,
+                      net_sales REAL, net_units_sold REAL,
+                      fba_fulfillment_fees REAL, referral_fee REAL,
+                      referral_fee_refunds REAL
+                    );
                     CREATE TABLE ppc_fact_clean (
                       report_date TEXT, campaign_name TEXT, brand TEXT,
                       spend REAL, ad_sales REAL
@@ -134,6 +157,10 @@ class DashboardTest(unittest.TestCase):
                       ('L1','Litet','Litet one','White','M','single');
                     INSERT INTO orders VALUES
                       ('O1','L1','2026-10-06',1,100,10,'Shipped','Shipped');
+                    INSERT INTO cogs_ledger VALUES
+                      ('L1',5,'2026-01-01',NULL);
+                    INSERT INTO asin_economics VALUES
+                      ('2026-09-01','2026-09-30','L1',100,10,-20,-10,0);
                 """)
             with patch.dict(os.environ, {"LITET_DB_PATH": database.name}):
                 result = prime_big_deals_performance()
@@ -141,8 +168,24 @@ class DashboardTest(unittest.TestCase):
             self.assertIsNone(result["profit"])
             self.assertIsNone(result["roi"])
             self.assertEqual(result["deal_fee"], 101.35)
+            self.assertEqual(result["cogs"], 5)
+            self.assertEqual(result["normal_fixed_fees"], 2)
+            self.assertAlmostEqual(result["normal_variable_fees"], 15.30)
+            self.assertAlmostEqual(result["amazon_fees"], 17.30)
+            self.assertAlmostEqual(result["profit_before_ppc"], -33.65)
+            self.assertEqual(result["estimated_fee_coverage"], 1)
         finally:
             os.unlink(database.name)
+
+    def test_clothing_referral_fee_uses_price_tiers_and_per_item_minimum(self):
+        from decision_dashboard_v2.analytics import clothing_referral_fee
+
+        self.assertEqual(clothing_referral_fee(10, 1), (.50, .05))
+        self.assertEqual(clothing_referral_fee(18, 1), (1.80, .10))
+        fee, rate = clothing_referral_fee(39.99, 1)
+        self.assertAlmostEqual(fee, 6.7983)
+        self.assertEqual(rate, .17)
+        self.assertEqual(clothing_referral_fee(2, 1), (.30, .05))
 
     def test_current_mtd_uses_latest_available_settled_pnl(self):
         response = self.client.get(
