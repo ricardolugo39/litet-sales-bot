@@ -82,7 +82,8 @@ class DashboardTest(unittest.TestCase):
                       ('O1','L1','2026-10-06T08:30:00+00:00',2,100,10,'Shipped','Shipped'),
                       ('O2','L2','2026-10-07T19:00:00+00:00',1,60,0,'Shipped','Shipped'),
                       ('O3','H1','2026-10-06T10:00:00+00:00',1,500,0,'Shipped','Shipped'),
-                      ('O4','L1','2026-10-08T00:01:00+00:00',1,999,0,'Shipped','Shipped'),
+                      ('O4','L1','2026-10-08T08:01:00+00:00',1,999,0,'Shipped','Shipped'),
+                      ('O6','L1','2026-10-06T03:00:00+00:00',1,777,0,'Shipped','Shipped'),
                       ('O5','L1','2026-10-06T09:00:00+00:00',1,50,0,'Cancelled','Cancelled');
                     INSERT INTO sales_profitability VALUES
                       ('O1','L1','2026-10-06','Litet',40,-20,'available','exact_order_fee_allocated'),
@@ -186,6 +187,14 @@ class DashboardTest(unittest.TestCase):
         self.assertAlmostEqual(fee, 6.7983)
         self.assertEqual(rate, .17)
         self.assertEqual(clothing_referral_fee(2, 1), (.30, .05))
+
+    def test_amazon_us_business_date_converts_utc_to_pacific(self):
+        from decision_dashboard_v2.analytics import amazon_us_date
+
+        self.assertEqual(amazon_us_date("2026-10-07T04:10:06+00:00"), "2026-10-06")
+        self.assertEqual(amazon_us_date("2026-10-07T07:00:00+00:00"), "2026-10-07")
+        self.assertEqual(amazon_us_date("2026-10-08T06:59:59+00:00"), "2026-10-07")
+        self.assertEqual(amazon_us_date("2026-10-08T07:00:00+00:00"), "2026-10-08")
 
     def test_current_mtd_uses_latest_available_settled_pnl(self):
         response = self.client.get(

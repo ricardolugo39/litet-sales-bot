@@ -1,8 +1,9 @@
 import os
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from statistics import median
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -47,6 +48,16 @@ def clothing_referral_fee(sales, units):
     return max(sales * rate, units * .30), rate
 
 
+def amazon_us_date(timestamp):
+    """Convert an ISO order timestamp to its Amazon US Pacific business date."""
+    if not timestamp:
+        return None
+    parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.date().isoformat()
+    return parsed.astimezone(ZoneInfo("America/Los_Angeles")).date().isoformat()
+
+
 def prime_big_deals_performance():
     """Return the LITET-only event P&L using the report's recorded dates.
 
@@ -56,27 +67,29 @@ def prime_big_deals_performance():
     costs as zero.
     """
     with connect() as conn:
+        conn.create_function("amazon_us_date", 1, amazon_us_date)
         rows = conn.execute(
             """
             WITH event_orders AS (
               SELECT o."amazon-order-id" order_id, o.asin,
-                     date(substr(o."purchase-date",1,10)) sale_day,
+                     amazon_us_date(o."purchase-date") sale_day,
                      SUM(CAST(o.quantity AS REAL)) units,
                      SUM(CAST(o."item-price" AS REAL)
                          - COALESCE(CAST(o."item-promotion-discount" AS REAL),0)) sales,
                      SUM(COALESCE(CAST(o."item-promotion-discount" AS REAL),0)) discount
               FROM orders o
               JOIN dim_product p ON p.asin=o.asin
-              WHERE date(substr(o."purchase-date",1,10)) BETWEEN ? AND ?
+              WHERE amazon_us_date(o."purchase-date") BETWEEN ? AND ?
                 AND p.canonical_brand='Litet'
                 AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
                 AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')
-              GROUP BY o."amazon-order-id",o.asin,date(substr(o."purchase-date",1,10))
+              GROUP BY o."amazon-order-id",o.asin,amazon_us_date(o."purchase-date")
             ), exact_costs AS (
               SELECT order_id,asin,SUM(amazon_fees) amazon_fees,
                      MIN(CASE WHEN fee_status='exact_order_fee_allocated' THEN 1 ELSE 0 END) fee_ready
               FROM sales_profitability
-              WHERE date(sale_date) BETWEEN ? AND ? AND brand='Litet'
+              WHERE date(sale_date) BETWEEN date(?,'-1 day') AND date(?,'+1 day')
+                AND brand='Litet'
               GROUP BY order_id,asin
             ), fee_components AS (
               SELECT e.asin,
