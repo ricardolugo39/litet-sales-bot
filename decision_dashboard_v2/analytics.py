@@ -228,7 +228,8 @@ def prime_big_deals_performance():
             ad_spend=daily_ad_spend,
             ad_sales=(ad_by_day.get(event_day) or {}).get("ad_sales", 0),
             profit_after_ppc=(item["contribution_before_ppc"]-daily_ad_spend
-                              if item["contribution_before_ppc"] is not None else None),
+                              if item["contribution_before_ppc"] is not None
+                              else -daily_ad_spend if daily_ad_spend else None),
         )
         daily.append(item)
 

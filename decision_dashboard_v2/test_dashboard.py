@@ -80,7 +80,7 @@ class DashboardTest(unittest.TestCase):
                       ('H1','Has10','Has10 item','Orange',NULL,'single');
                     INSERT INTO orders VALUES
                       ('O1','L1','2026-10-06T08:30:00+00:00',2,100,10,'Shipped','Shipped'),
-                      ('O2','L2','2026-10-07T19:00:00+00:00',1,60,0,'Shipped','Shipped'),
+                      ('O2','L2','2026-10-06T19:00:00+00:00',1,60,0,'Shipped','Shipped'),
                       ('O3','H1','2026-10-06T10:00:00+00:00',1,500,0,'Shipped','Shipped'),
                       ('O4','L1','2026-10-08T08:01:00+00:00',1,999,0,'Shipped','Shipped'),
                       ('O6','L1','2026-10-06T03:00:00+00:00',1,777,0,'Shipped','Shipped'),
@@ -110,9 +110,10 @@ class DashboardTest(unittest.TestCase):
             self.assertAlmostEqual(result["profit"], -57.25)
             self.assertAlmostEqual(result["roi"], -57.25 / 102.25)
             self.assertAlmostEqual(
-                sum(day["profit_after_ppc"] for day in result["daily"]),
+                sum(day["profit_after_ppc"] or 0 for day in result["daily"]),
                 result["profit"],
             )
+            self.assertEqual(result["daily"][1]["profit_after_ppc"], -8)
             self.assertTrue(result["complete"])
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Prime Big Deal Days", response.data)
