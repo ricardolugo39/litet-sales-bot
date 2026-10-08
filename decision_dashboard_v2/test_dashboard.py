@@ -257,6 +257,51 @@ class DashboardTest(unittest.TestCase):
         finally:
             os.unlink(database.name)
 
+    def test_prime_event_uses_confirmed_provisional_fba_for_new_event_asin(self):
+        from decision_dashboard_v2.analytics import prime_big_deals_performance
+
+        database = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        database.close()
+        try:
+            with sqlite3.connect(database.name) as conn:
+                conn.executescript("""
+                    CREATE TABLE dim_product (asin TEXT, canonical_brand TEXT,
+                      canonical_product_name TEXT, color TEXT, size TEXT, pack_type TEXT);
+                    CREATE TABLE orders ("amazon-order-id" TEXT, asin TEXT,
+                      "purchase-date" TEXT, quantity REAL, "item-price" REAL,
+                      "item-promotion-discount" REAL, "order-status" TEXT,
+                      "item-status" TEXT);
+                    CREATE TABLE sales_profitability (order_id TEXT, asin TEXT,
+                      sale_date TEXT, brand TEXT, cogs_amount REAL,
+                      amazon_fees REAL, cogs_status TEXT, fee_status TEXT);
+                    CREATE TABLE cogs_ledger (asin TEXT, unit_cogs REAL,
+                      effective_start TEXT, effective_end TEXT);
+                    CREATE TABLE asin_economics (period_start TEXT,
+                      period_end TEXT, asin TEXT, net_sales REAL,
+                      net_units_sold REAL, fba_fulfillment_fees REAL,
+                      referral_fee REAL, referral_fee_refunds REAL);
+                    CREATE TABLE ppc_fact_clean (report_date TEXT,
+                      campaign_name TEXT, brand TEXT, spend REAL, ad_sales REAL);
+                    INSERT INTO dim_product VALUES
+                      ('B0GSXJY1HQ','Litet','6-pack','White','Small/Medium','6-pack');
+                    INSERT INTO orders VALUES
+                      ('O1','B0GSXJY1HQ','2026-10-06T18:00:00+00:00',1,55.99,0,
+                       'Shipped','Shipped');
+                    INSERT INTO cogs_ledger VALUES
+                      ('B0GSXJY1HQ',12,'2026-01-01',NULL);
+                    INSERT INTO ppc_fact_clean VALUES
+                      ('2026-10-06','LITET event','Litet',0,0);
+                """)
+            with patch.dict(os.environ, {"LITET_DB_PATH": database.name}):
+                result = prime_big_deals_performance()
+            self.assertEqual(result["estimated_fee_coverage"], 1)
+            self.assertEqual(result["provisional_fba_asins"], ["B0GSXJY1HQ"])
+            self.assertAlmostEqual(result["normal_fixed_fees"], 3.90)
+            self.assertAlmostEqual(result["normal_variable_fees"], 55.99 * .17)
+            self.assertIsNotNone(result["profit"])
+        finally:
+            os.unlink(database.name)
+
     def test_current_mtd_uses_latest_available_settled_pnl(self):
         response = self.client.get(
             "/?brand=Litet&period=2026-09-01%7C2026-09-04"

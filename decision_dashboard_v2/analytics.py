@@ -37,6 +37,9 @@ PRIME_BIG_DEALS_END = "2026-10-07"
 PRIME_BIG_DEALS_UPFRONT_FEE = 100.0
 PRIME_BIG_DEALS_VARIABLE_RATE = 0.015
 PRIME_BIG_DEALS_VARIABLE_CAP = 5000.0
+# User-confirmed provisional FBA fees for event ASINs without a completed-month
+# fee history. Keep these explicit so they are never inferred for another ASIN.
+PRIME_BIG_DEALS_PROVISIONAL_FBA = {"B0GSXJY1HQ": 3.90}
 
 
 def clothing_referral_fee(sales, units):
@@ -149,7 +152,13 @@ def prime_big_deals_performance():
         if row["fee_ready"]:
             row["amazon_fees"] = abs(row["exact_amazon_fees"] or 0)
             row["fee_method"] = "exact"
-        elif row["fba_per_unit"] is not None and row["units"]:
+        elif (row["fba_per_unit"] is not None
+              or row["asin"] in PRIME_BIG_DEALS_PROVISIONAL_FBA) and row["units"]:
+            if row["fba_per_unit"] is None:
+                row["fba_per_unit"] = PRIME_BIG_DEALS_PROVISIONAL_FBA[row["asin"]]
+                row["fee_method"] = "estimated_provisional_fba"
+            else:
+                row["fee_method"] = "estimated_asin_components"
             referral_fee, referral_rate = clothing_referral_fee(
                 row["sales"] or 0, row["units"]
             )
@@ -158,7 +167,6 @@ def prime_big_deals_performance():
             row["referral_rate"] = referral_rate
             row["amazon_fees"] = (row["normal_fixed_fee"]
                                   + row["normal_variable_fee"])
-            row["fee_method"] = "estimated_asin_components"
         else:
             row["amazon_fees"] = 0
             row["fee_method"] = "missing"
@@ -169,7 +177,8 @@ def prime_big_deals_performance():
     covered_sales_fees = sum((row["sales"] or 0) for row in source if row["fee_ready"])
     estimated_sales_fees = sum(
         (row["sales"] or 0) for row in source
-        if row["fee_method"] == "estimated_asin_components"
+        if row["fee_method"] in {"estimated_asin_components",
+                                 "estimated_provisional_fba"}
     )
     cogs_coverage = covered_sales_cogs / sales if sales else None
     fee_coverage = covered_sales_fees / sales if sales else None
@@ -274,6 +283,10 @@ def prime_big_deals_performance():
         "cogs_coverage": cogs_coverage,
         "fee_coverage": fee_coverage,
         "estimated_fee_coverage": estimated_fee_coverage,
+        "provisional_fba_asins": sorted({
+            row["asin"] for row in source
+            if row["fee_method"] == "estimated_provisional_fba"
+        }),
         "daily": daily,
         "products": products,
         "last_order_date": last_order_date,
