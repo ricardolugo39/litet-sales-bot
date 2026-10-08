@@ -202,6 +202,61 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(amazon_us_date("2026-10-08T06:59:59+00:00"), "2026-10-07")
         self.assertEqual(amazon_us_date("2026-10-08T07:00:00+00:00"), "2026-10-08")
 
+    def test_prime_event_handles_asin_without_fee_history(self):
+        from decision_dashboard_v2.analytics import prime_big_deals_performance
+
+        database = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        database.close()
+        try:
+            with sqlite3.connect(database.name) as conn:
+                conn.executescript("""
+                    CREATE TABLE dim_product (
+                      asin TEXT, canonical_brand TEXT, canonical_product_name TEXT,
+                      color TEXT, size TEXT, pack_type TEXT
+                    );
+                    CREATE TABLE orders (
+                      "amazon-order-id" TEXT, asin TEXT, "purchase-date" TEXT,
+                      quantity REAL, "item-price" REAL,
+                      "item-promotion-discount" REAL,
+                      "order-status" TEXT, "item-status" TEXT
+                    );
+                    CREATE TABLE sales_profitability (
+                      order_id TEXT, asin TEXT, sale_date TEXT, brand TEXT,
+                      cogs_amount REAL, amazon_fees REAL,
+                      cogs_status TEXT, fee_status TEXT
+                    );
+                    CREATE TABLE cogs_ledger (
+                      asin TEXT, unit_cogs REAL, effective_start TEXT,
+                      effective_end TEXT
+                    );
+                    CREATE TABLE asin_economics (
+                      period_start TEXT, period_end TEXT, asin TEXT,
+                      net_sales REAL, net_units_sold REAL,
+                      fba_fulfillment_fees REAL, referral_fee REAL,
+                      referral_fee_refunds REAL
+                    );
+                    CREATE TABLE ppc_fact_clean (
+                      report_date TEXT, campaign_name TEXT, brand TEXT,
+                      spend REAL, ad_sales REAL
+                    );
+                    INSERT INTO dim_product VALUES
+                      ('NEW1','Litet','New Litet ASIN','White','M','single');
+                    INSERT INTO orders VALUES
+                      ('O1','NEW1','2026-10-06T18:00:00+00:00',1,12,0,
+                       'Shipped','Shipped');
+                    INSERT INTO cogs_ledger VALUES
+                      ('NEW1',3,'2026-01-01',NULL);
+                """)
+            with patch.dict(os.environ, {"LITET_DB_PATH": database.name}):
+                result = prime_big_deals_performance()
+                response = self.client.get("/events/prime-big-deals-2026")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(result["sales"], 12)
+            self.assertEqual(result["estimated_fee_coverage"], 0)
+            self.assertIsNone(result["profit"])
+        finally:
+            os.unlink(database.name)
+
     def test_current_mtd_uses_latest_available_settled_pnl(self):
         response = self.client.get(
             "/?brand=Litet&period=2026-09-01%7C2026-09-04"

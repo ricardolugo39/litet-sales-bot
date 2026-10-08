@@ -144,10 +144,10 @@ def prime_big_deals_performance():
     discounts = sum(row["discount"] or 0 for row in source)
     cogs = sum(row["cogs"] or 0 for row in source)
     for row in source:
+        row["normal_fixed_fee"] = 0
+        row["normal_variable_fee"] = 0
         if row["fee_ready"]:
             row["amazon_fees"] = abs(row["exact_amazon_fees"] or 0)
-            row["normal_fixed_fee"] = None
-            row["normal_variable_fee"] = None
             row["fee_method"] = "exact"
         elif row["fba_per_unit"] is not None and row["units"]:
             referral_fee, referral_rate = clothing_referral_fee(
