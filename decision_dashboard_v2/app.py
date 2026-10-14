@@ -224,6 +224,15 @@ def percent(value):
     try: return "—" if value is None else f"{float(value):.1%}"
     except (TypeError, ValueError): return "—"
 
+@app.template_filter("rank_class")
+def rank_class(value):
+    if value is None: return "muted"
+    return "good" if value <= 10 else "warn" if value <= 20 else "bad"
+
+@app.template_filter("rank_label")
+def rank_label(value):
+    return "Not ranked" if value is None else f"#{value:g}"
+
 def selection():
     choices=ppc_periods(); selected=request.args.get("period")
     selected_parts=selected.split("|") if selected else []
