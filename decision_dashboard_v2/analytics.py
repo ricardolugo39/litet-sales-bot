@@ -1876,4 +1876,5 @@ def pricing_case(period_start, period_end, brand, asin=None):
             "data_quality":data_quality,"verdict":verdict,"rolling":rolling,"monthly_evidence":monthly,
             "price_bands":price_bands,"historical_decision_ready":historical_decision_ready,"next_step":next_step,
             "cogs_source":cogs_record["source"] if cogs_record else None,
-            "cogs_is_placeholder":bool(cogs_record and "placeholder" in (cogs_record["source"] or "").lower())}
+            "cogs_is_placeholder":bool(cogs_record and "placeholder" in (cogs_record["source"] or "").lower()),
+            "cogs_is_owner_confirmed":bool(cogs_record and cogs_record["source"] == "owner_confirmed_us_landed_cost")}

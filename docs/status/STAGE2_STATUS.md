@@ -4,7 +4,7 @@
 
 - `cogs_ledger`: effective-dated, ASIN-keyed moving-average cost history.
 - `vendor_receipts`: manually entered receipt/batch log.
-- Idempotent placeholder seeding from `seeds/cogs_placeholder_seed.csv`.
+- Idempotent provenance-aware seeding from `seeds/cogs_placeholder_seed.csv`.
 - Transactional vendor-receipt posting that:
   1. reads the latest inventory snapshot quantity for the ASIN;
   2. calculates the weighted-average unit cost;
@@ -20,7 +20,10 @@
 
 - Seed rows loaded: 39.
 - Effective start: `2026-05-01`, the earliest date in the current `transactions` table.
-- Source: `placeholder_seed`.
+- Source: 27 Has10 rows remain `placeholder_seed`. The 12 LITET rows are
+  `owner_confirmed_us_landed_cost`, confirmed by the owner on 2026-10-19 as
+  landed cost in the United States. They are not invoice-verified and do not
+  contain a manufacturing/freight/duty/packaging component breakdown.
 - Current rows: 39.
 - Excluded placeholder ASIN `XXXXXXXXX`: 0 rows.
 - All 39 seeded ASINs exist in the governed product dimension.

@@ -29,7 +29,7 @@ def seed_cogs_ledger(
     seed_path: str | Path,
     effective_start: str,
 ) -> int:
-    """Idempotently seed current placeholder COGS rows keyed by ASIN."""
+    """Idempotently seed current COGS rows keyed by ASIN and provenance."""
     apply_stage2_schema(conn)
     seed = pd.read_csv(seed_path, dtype={"asin": str, "sku": str})
     seed["asin"] = seed["asin"].fillna("").str.strip()
@@ -38,6 +38,14 @@ def seed_cogs_ledger(
         duplicates = sorted(seed.loc[seed["asin"].duplicated(keep=False), "asin"].unique())
         raise ValueError(f"Duplicate ASINs in COGS seed: {duplicates}")
     seed["cogs"] = pd.to_numeric(seed["cogs"], errors="raise")
+    if "source" not in seed:
+        seed["source"] = "placeholder_seed"
+    else:
+        seed["source"] = seed["source"].fillna("placeholder_seed")
+    if "source_reference" not in seed:
+        seed["source_reference"] = str(seed_path)
+    else:
+        seed["source_reference"] = seed["source_reference"].fillna(str(seed_path))
 
     inserted = 0
     with conn:
@@ -59,9 +67,12 @@ def seed_cogs_ledger(
                     cogs_ledger_key, asin, unit_cogs, effective_start,
                     effective_end, is_current, source, source_reference,
                     inventory_qty_status
-                ) VALUES (?, ?, ?, ?, NULL, 1, 'placeholder_seed', ?, 'seed_not_applicable')
+                ) VALUES (?, ?, ?, ?, NULL, 1, ?, ?, 'seed_not_applicable')
                 """,
-                (key, row.asin, float(row.cogs), effective_start, str(seed_path)),
+                (
+                    key, row.asin, float(row.cogs), effective_start,
+                    row.source, row.source_reference,
+                ),
             )
             inserted += 1
     return inserted

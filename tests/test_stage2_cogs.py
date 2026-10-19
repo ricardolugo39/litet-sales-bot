@@ -45,6 +45,24 @@ class Stage2CogsTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(rows, [("A1", 2.0, "placeholder_seed", 1)])
 
+    def test_seed_preserves_owner_confirmed_landed_cost_provenance(self):
+        self.seed_path.write_text(
+            "asin,product_name,product_category,type,sku,cogs,source,source_reference\n"
+            "A1,Product One,Test,single,SKU1,2.0,owner_confirmed_us_landed_cost,"
+            "Owner confirmation 2026-10-19\n"
+        )
+        self.assertEqual(seed_cogs_ledger(self.conn, self.seed_path, "2023-01-01"), 1)
+        row = self.conn.execute(
+            "SELECT unit_cogs, effective_start, source, source_reference "
+            "FROM cogs_ledger WHERE asin='A1'"
+        ).fetchone()
+        self.assertEqual(
+            row,
+            (2.0, "2023-01-01", "owner_confirmed_us_landed_cost",
+             "Owner confirmation 2026-10-19"),
+        )
+        self.assertEqual(seed_cogs_ledger(self.conn, self.seed_path, "2023-01-01"), 0)
+
     def test_receipt_recalculates_weighted_average_and_closes_prior_row(self):
         seed_cogs_ledger(self.conn, self.seed_path, "2026-01-01")
         self.conn.execute(

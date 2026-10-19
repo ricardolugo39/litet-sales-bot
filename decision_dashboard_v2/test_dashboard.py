@@ -752,7 +752,8 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Prior 6 settled months", response.data)
         self.assertIn(b"Historical price and conversion context", response.data)
-        self.assertIn(b"placeholder seed", response.data)
+        self.assertIn(b"Owner-confirmed US landed cost", response.data)
+        self.assertNotIn(b"placeholder seed", response.data)
         self.assertIn(b"2026-08-01 to 2026-08-31", response.data)
         self.assertIn(b"Incomplete period", response.data)
 
