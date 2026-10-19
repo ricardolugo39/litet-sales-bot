@@ -195,12 +195,48 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(clothing_referral_fee(2, 1), (.30, .05))
 
     def test_amazon_us_business_date_converts_utc_to_pacific(self):
-        from decision_dashboard_v2.analytics import amazon_us_date
+        from decision_dashboard_v2.analytics import amazon_us_date, midpoint_arc_elasticity
 
         self.assertEqual(amazon_us_date("2026-10-07T04:10:06+00:00"), "2026-10-06")
         self.assertEqual(amazon_us_date("2026-10-07T07:00:00+00:00"), "2026-10-07")
         self.assertEqual(amazon_us_date("2026-10-08T06:59:59+00:00"), "2026-10-07")
         self.assertEqual(amazon_us_date("2026-10-08T07:00:00+00:00"), "2026-10-08")
+        # DST boundaries remain Pacific-date safe and elasticity suppresses
+        # unchanged-price / zero-denominator cases.
+        self.assertEqual(amazon_us_date("2026-11-01T08:30:00+00:00"), "2026-11-01")
+        self.assertIsNone(midpoint_arc_elasticity(2, 3, 10, 10))
+        self.assertIsNone(midpoint_arc_elasticity(0, 0, 10, 12))
+        self.assertAlmostEqual(midpoint_arc_elasticity(10, 8, 10, 12), -1.2222222222)
+
+    def test_price_change_page_uses_completed_matched_days_and_all_asins(self):
+        from decision_dashboard_v2.analytics import price_change_performance
+
+        result = price_change_performance(7, False)
+        response = self.client.get("/price-change?window=7&transition=exclude")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(result["before_dates"]), len(result["after_dates"]))
+        self.assertEqual(len(result["asin_rows"]), 12)
+        self.assertEqual(result["completed_through"], "2026-10-18")
+        self.assertIn(b"Provisional\xe2\x80\x94not decision-ready", response.data)
+        self.assertIn(b"Customer sentiment", response.data)
+        self.assertIn(b"Not assessed", response.data)
+        self.assertIn(b"B0FFQ5Z8CS", response.data)
+        self.assertNotIn(b"Prime event</a>", response.data)
+
+    def test_price_change_transition_control_and_sparse_views(self):
+        from decision_dashboard_v2.analytics import price_change_performance
+
+        excluded = price_change_performance(28, False)
+        included = price_change_performance(14, True)
+        self.assertNotIn("2026-10-17", excluded["after_dates"])
+        self.assertIn("2026-10-17", included["after_dates"])
+        self.assertEqual(len(included["before_dates"]), len(included["after_dates"]))
+        self.assertTrue(any(row["after"]["packs"] == 0 for row in included["asin_rows"]))
+        self.assertTrue(any(row["elasticity"] is None for row in included["asin_rows"]))
+        response = self.client.get("/price-change?window=14&transition=include")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Include transition day", response.data)
+        self.assertIn(b"No price change", response.data)
 
     def test_prime_event_handles_asin_without_fee_history(self):
         from decision_dashboard_v2.analytics import prime_big_deals_performance

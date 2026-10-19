@@ -16,14 +16,14 @@ else:
 if __package__:
     from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                             market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                            ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
+                            ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, price_change_performance, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
     from .interventions import (recent_interventions, record_action_proposal,
                                 record_adjustment_proposal, record_pricing_case,
                                 update_intervention_status)
 else:  # Supports `python app.py` from this directory.
     from analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                            market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                           ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
+                           ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, price_change_performance, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
     from interventions import (recent_interventions, record_action_proposal,
                                record_adjustment_proposal, record_pricing_case,
                                update_intervention_status)
@@ -304,6 +304,19 @@ def prime_big_deals():
     return render_template("prime_big_deals.html",
                            page="prime_big_deals",
                            event=prime_big_deals_performance())
+
+
+@app.get("/price-change")
+def price_change():
+    try:
+        window = int(request.args.get("window", "7"))
+    except ValueError:
+        window = 7
+    include_transition = request.args.get("transition", "exclude") == "include"
+    return render_template(
+        "price_change.html", page="price_change",
+        analysis=price_change_performance(window, include_transition),
+    )
 
 @app.get("/decisions")
 def decisions():

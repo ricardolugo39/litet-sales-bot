@@ -46,6 +46,15 @@ PRIME_BIG_DEALS_VARIABLE_CAP = 5000.0
 # fee history. Keep these explicit so they are never inferred for another ASIN.
 PRIME_BIG_DEALS_PROVISIONAL_FBA = {"B0GSXJY1HQ": 3.90}
 
+PRICE_CHANGE_DATE = date(2026, 10, 17)
+PRICE_CHANGE_PRICES = {
+    "single": {"old": 14.99, "new": 17.99},
+    "3-pack": {"old": 39.99, "new": 42.99},
+    "6-pack": {"old": 69.99, "new": 69.99},
+}
+PRICE_CHANGE_PROMOTION_DAYS = {date(2026, 10, 6), date(2026, 10, 7)}
+PRICE_CHANGE_MAPPING_WARNING_ASIN = "B0FFQ5Z8CS"
+
 
 def clothing_referral_fee(sales, units):
     """US Clothing referral fee using discounted per-unit sales price."""
@@ -64,6 +73,379 @@ def amazon_us_date(timestamp):
     if parsed.tzinfo is None:
         return parsed.date().isoformat()
     return parsed.astimezone(ZoneInfo("America/Los_Angeles")).date().isoformat()
+
+
+def midpoint_arc_elasticity(before_quantity, after_quantity,
+                            before_price, after_price):
+    """Return descriptive midpoint elasticity, or None when not identified."""
+    values = (before_quantity, after_quantity, before_price, after_price)
+    if any(value is None or value < 0 for value in values):
+        return None
+    quantity_midpoint = (before_quantity + after_quantity) / 2
+    price_midpoint = (before_price + after_price) / 2
+    if not quantity_midpoint or not price_midpoint or before_price == after_price:
+        return None
+    price_change = (after_price - before_price) / price_midpoint
+    if abs(price_change) < 1e-12:
+        return None
+    quantity_change = (after_quantity - before_quantity) / quantity_midpoint
+    return quantity_change / price_change
+
+
+def price_change_performance(window=7, include_transition=False):
+    """Describe the October 17 Litet price change without claiming causality.
+
+    The comparison uses completed Pacific days only. Each available post-change
+    day is paired with the same weekday four weeks earlier, keeping raw day
+    counts equal even while the 7/14/28-day views are still filling in.
+    """
+    window = window if window in {7, 14, 28} else 7
+    with connect() as conn:
+        conn.create_function("amazon_us_date", 1, amazon_us_date)
+        products = [dict(row) for row in conn.execute(
+            """SELECT asin,canonical_product_name,color,size,pack_type,
+                      units_per_sellable_unit
+               FROM dim_product
+               WHERE canonical_brand='Litet' AND is_current=1
+               ORDER BY CASE pack_type WHEN 'single' THEN 1 WHEN '3-pack' THEN 2 ELSE 3 END,
+                        color,size"""
+        ).fetchall()]
+        latest_order_timestamp = conn.execute(
+            """SELECT MAX(o."purchase-date") FROM orders o
+               JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
+               WHERE p.canonical_brand='Litet'"""
+        ).fetchone()[0]
+        latest_order_day = (date.fromisoformat(amazon_us_date(latest_order_timestamp))
+                            if latest_order_timestamp else None)
+        today_pacific = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+        completed_through = min(latest_order_day, today_pacific - timedelta(days=1)) \
+            if latest_order_day else None
+        after_start = PRICE_CHANGE_DATE if include_transition else PRICE_CHANGE_DATE + timedelta(days=1)
+        intended_after_end = after_start + timedelta(days=window - 1)
+        after_end = min(intended_after_end, completed_through) if completed_through else None
+        after_dates = []
+        if after_end and after_end >= after_start:
+            after_dates = [after_start + timedelta(days=offset)
+                           for offset in range((after_end-after_start).days+1)]
+        before_dates = [day - timedelta(days=28) for day in after_dates]
+
+        order_rows = [dict(row) for row in conn.execute(
+            """SELECT o."amazon-order-id" order_id,o.asin,
+                      o."purchase-date" purchase_timestamp,
+                      amazon_us_date(o."purchase-date") sale_day,
+                      COALESCE(o."order-status",'Unknown') order_status,
+                      SUM(CAST(COALESCE(NULLIF(o.quantity,''),'0') AS REAL)) packs,
+                      SUM(CAST(COALESCE(NULLIF(o."item-price",''),'0') AS REAL)
+                          -COALESCE(CAST(NULLIF(o."item-promotion-discount",'') AS REAL),0)) revenue,
+                      SUM(COALESCE(CAST(NULLIF(o."item-promotion-discount",'') AS REAL),0)) item_discount,
+                      SUM(COALESCE(CAST(NULLIF(o."ship-promotion-discount",'') AS REAL),0)) ship_discount,
+                      MAX(CASE WHEN TRIM(COALESCE(o."promotion-ids",''))<>'' THEN 1 ELSE 0 END) has_promotion_id
+               FROM orders o
+               JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
+               WHERE p.canonical_brand='Litet'
+                 AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
+                 AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')
+                 AND CAST(COALESCE(NULLIF(o.quantity,''),'0') AS REAL)>0
+               GROUP BY o."amazon-order-id",o.asin,o."purchase-date",o."order-status"
+               """
+        ).fetchall()]
+        exact_fees = {(row["order_id"], row["asin"]): dict(row)
+                      for row in conn.execute(
+            """SELECT order_id,asin,ABS(SUM(amazon_fees)) fee,
+                      MIN(CASE WHEN fee_status='exact_order_fee_allocated' THEN 1 ELSE 0 END) exact_ready
+               FROM sales_profitability WHERE brand='Litet'
+               GROUP BY order_id,asin"""
+        ).fetchall()}
+        cogs_rows = conn.execute(
+            """SELECT asin,unit_cogs,source FROM cogs_ledger
+               WHERE effective_start<=? AND (effective_end IS NULL OR effective_end>?)
+               ORDER BY effective_start DESC""",
+            [PRICE_CHANGE_DATE.isoformat(), PRICE_CHANGE_DATE.isoformat()],
+        ).fetchall()
+        cogs = {}
+        cogs_source = {}
+        for row in cogs_rows:
+            if row["asin"] not in cogs:
+                cogs[row["asin"]] = row["unit_cogs"]
+                cogs_source[row["asin"]] = row["source"]
+        fba_rates = {row["asin"]: row["fba_per_pack"] for row in conn.execute(
+            """SELECT e.asin,ABS(SUM(e.fba_fulfillment_fees))
+                            /NULLIF(SUM(e.net_units_sold),0) fba_per_pack
+               FROM asin_economics e
+               JOIN dim_product p ON p.asin=e.asin AND p.is_current=1
+               WHERE p.canonical_brand='Litet' AND e.period_start='2026-09-01'
+                 AND e.period_end='2026-09-30'
+               GROUP BY e.asin"""
+        ).fetchall()}
+
+        ppc_rows = [dict(row) for row in conn.execute(
+            """SELECT report_date sale_day,SUM(spend) spend,SUM(ad_sales) ad_sales,
+                      SUM(ad_orders) ad_orders
+               FROM ppc_fact_clean
+               WHERE brand='Litet' AND lower(campaign_name) LIKE '%litet%'
+               GROUP BY report_date"""
+        ).fetchall()]
+        ppc_cutoff = conn.execute(
+            """SELECT MAX(report_date) FROM ppc_fact_clean
+               WHERE brand='Litet' AND lower(campaign_name) LIKE '%litet%'"""
+        ).fetchone()[0]
+        traffic = conn.execute(
+            """SELECT MIN(period_start) period_start,MAX(period_end) cutoff,
+                      COUNT(DISTINCT period_end) snapshots
+               FROM business_traffic b JOIN dim_product p ON p.asin=b.child_asin
+               WHERE p.canonical_brand='Litet' AND b.period_start='2026-10-01'"""
+        ).fetchone()
+        traffic_rows = [dict(row) for row in conn.execute(
+            """SELECT period_start,period_end,child_asin,sessions_total,units_ordered
+               FROM business_traffic b JOIN dim_product p ON p.asin=b.child_asin
+               WHERE p.canonical_brand='Litet'"""
+        ).fetchall()]
+        refund_cutoff = conn.execute(
+            """SELECT MAX(period_end) FROM asin_economics e
+               JOIN dim_product p ON p.asin=e.asin AND p.is_current=1
+               WHERE p.canonical_brand='Litet'"""
+        ).fetchone()[0]
+        inventory_rows = [dict(row) for row in conn.execute(
+            """SELECT i.asin,i.snapshot_date,
+                      SUM(CAST(COALESCE(NULLIF(i."Quantity Available",''),'0') AS REAL)) available
+               FROM inventory_snapshots i JOIN dim_product p ON p.asin=i.asin AND p.is_current=1
+               WHERE p.canonical_brand='Litet'
+                 AND date(i.snapshot_date)<=date(?)
+                 AND date(i.snapshot_date)=(SELECT MAX(date(x.snapshot_date))
+                    FROM inventory_snapshots x WHERE x.asin=i.asin AND date(x.snapshot_date)<=date(?))
+               GROUP BY i.asin,i.snapshot_date""",
+            [(completed_through or PRICE_CHANGE_DATE).isoformat()]*2,
+        ).fetchall()]
+
+    product_by_asin = {row["asin"]: row for row in products}
+    inventory = {row["asin"]: row for row in inventory_rows}
+    for row in order_rows:
+        product = product_by_asin[row["asin"]]
+        row["sale_date"] = date.fromisoformat(row["sale_day"])
+        row["pairs"] = row["packs"] * product["units_per_sellable_unit"]
+        row["promoted"] = bool(row["item_discount"] or row["ship_discount"]
+                               or row["has_promotion_id"])
+        fee = exact_fees.get((row["order_id"], row["asin"]))
+        if fee and fee["exact_ready"]:
+            row["fee"] = fee["fee"]
+            row["fee_method"] = "exact"
+        elif fba_rates.get(row["asin"]) is not None:
+            referral, unused_rate = clothing_referral_fee(row["revenue"], row["packs"])
+            row["fee"] = row["packs"] * fba_rates[row["asin"]] + referral
+            row["fee_method"] = "estimated"
+        else:
+            row["fee"] = None
+            row["fee_method"] = "missing"
+        row["cogs"] = (row["packs"] * cogs[row["asin"]]
+                       if row["asin"] in cogs else None)
+        row["contribution"] = (row["revenue"]-row["cogs"]-row["fee"]
+                               if row["cogs"] is not None and row["fee"] is not None
+                               else None)
+
+    def stats(entries, days):
+        selected = [row for row in entries if row["sale_date"] in days]
+        day_count = len(days)
+        packs = sum(row["packs"] for row in selected)
+        pairs = sum(row["pairs"] for row in selected)
+        revenue = sum(row["revenue"] for row in selected)
+        contribution_rows = [row for row in selected if row["contribution"] is not None]
+        contribution = sum(row["contribution"] for row in contribution_rows)
+        fee_revenue = sum(row["revenue"] for row in selected if row["fee_method"] == "exact")
+        estimated_revenue = sum(row["revenue"] for row in selected if row["fee_method"] == "estimated")
+        statuses = {}
+        for row in selected:
+            statuses[row["order_status"]] = statuses.get(row["order_status"], 0) + row["packs"]
+        return {
+            "days": day_count,
+            "start": min(days).isoformat() if days else None,
+            "end": max(days).isoformat() if days else None,
+            "packs": packs, "pairs": pairs, "revenue": revenue,
+            "packs_per_day": packs/day_count if day_count else None,
+            "pairs_per_day": pairs/day_count if day_count else None,
+            "revenue_per_day": revenue/day_count if day_count else None,
+            "price_per_pack": revenue/packs if packs else None,
+            "price_per_pair": revenue/pairs if pairs else None,
+            "contribution": contribution if len(contribution_rows) == len(selected) else None,
+            "contribution_per_day": contribution/day_count if day_count and len(contribution_rows) == len(selected) else None,
+            "contribution_per_pack": contribution/packs if packs and len(contribution_rows) == len(selected) else None,
+            "exact_fee_coverage": fee_revenue/revenue if revenue else None,
+            "estimated_fee_coverage": estimated_revenue/revenue if revenue else None,
+            "promoted_packs": sum(row["packs"] for row in selected if row["promoted"]),
+            "statuses": statuses,
+            "raw_orders": len({row["order_id"] for row in selected}),
+        }
+
+    before = stats(order_rows, set(before_dates))
+    after = stats(order_rows, set(after_dates))
+
+    def traffic_interval(days):
+        """Difference compatible cumulative snapshots for one contiguous interval."""
+        if not days or any(days[index] != days[index-1] + timedelta(days=1)
+                           for index in range(1, len(days))):
+            return None
+        start, end = days[0], days[-1]
+        if start.month != end.month or start.year != end.year:
+            return None
+        period_start = start.replace(day=1).isoformat()
+        end_rows = {row["child_asin"]: row for row in traffic_rows
+                    if row["period_start"] == period_start
+                    and row["period_end"] == end.isoformat()}
+        boundary = start - timedelta(days=1)
+        if boundary < start.replace(day=1):
+            start_rows = {asin: {"sessions_total": 0, "units_ordered": 0}
+                          for asin in end_rows}
+        else:
+            start_rows = {row["child_asin"]: row for row in traffic_rows
+                          if row["period_start"] == period_start
+                          and row["period_end"] == boundary.isoformat()}
+        if not end_rows or set(end_rows) != set(start_rows):
+            return None
+        sessions = sum(end_rows[asin]["sessions_total"]-start_rows[asin]["sessions_total"]
+                       for asin in end_rows)
+        units = sum(end_rows[asin]["units_ordered"]-start_rows[asin]["units_ordered"]
+                    for asin in end_rows)
+        if sessions < 0 or units < 0:
+            return None
+        return {"sessions": sessions, "units": units,
+                "units_per_session": units/sessions if sessions else None,
+                "start_snapshot": boundary.isoformat(), "end_snapshot": end.isoformat()}
+
+    before["traffic"] = traffic_interval(before_dates)
+    after["traffic"] = traffic_interval(after_dates)
+    ppc_by_day = {date.fromisoformat(row["sale_day"]): row for row in ppc_rows}
+    for result, days in ((before, before_dates), (after, after_dates)):
+        result["ad_spend"] = sum((ppc_by_day.get(day) or {}).get("spend") or 0 for day in days)
+        result["contribution_after_ads"] = (result["contribution"]-result["ad_spend"]
+                                            if result["contribution"] is not None else None)
+
+    def comparison_for(product):
+        entries = [row for row in order_rows if row["asin"] == product["asin"]]
+        result_before = stats(entries, set(before_dates))
+        result_after = stats(entries, set(after_dates))
+        price = PRICE_CHANGE_PRICES.get(product["pack_type"], {})
+        elasticity = midpoint_arc_elasticity(
+            result_before["packs_per_day"], result_after["packs_per_day"],
+            result_before["price_per_pack"], result_after["price_per_pack"],
+        ) if result_before["packs"] and result_after["packs"] else None
+        regular = [row for row in entries if not row["promoted"]]
+        old_rows = [row for row in regular if price.get("old") is not None
+                    and abs(row["revenue"]/row["packs"]-price["old"]) < .005]
+        new_rows = [row for row in regular if price.get("new") is not None
+                    and abs(row["revenue"]/row["packs"]-price["new"]) < .005]
+        last_old = max(old_rows, key=lambda row: row["purchase_timestamp"]) if old_rows else None
+        first_new = min(new_rows, key=lambda row: row["purchase_timestamp"]) if new_rows else None
+        for evidence in (last_old, first_new):
+            if evidence:
+                parsed = datetime.fromisoformat(evidence["purchase_timestamp"].replace("Z", "+00:00"))
+                evidence["utc_timestamp"] = parsed.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S UTC")
+                evidence["pacific_timestamp"] = parsed.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M:%S %Z")
+        inv = inventory.get(product["asin"], {})
+        scenario = None
+        if (result_before["contribution_per_pack"] is not None
+                and result_after["contribution_per_pack"] is not None
+                and result_before["contribution_per_pack"] > 0
+                and result_after["contribution_per_pack"] > 0
+                and result_before["exact_fee_coverage"] == 1
+                and result_after["exact_fee_coverage"] == 1
+                and result_before["packs_per_day"]):
+            required = (result_before["contribution_per_day"]
+                        / result_after["contribution_per_pack"])
+            scenario = {
+                "required_packs_per_day": required,
+                "allowable_volume_loss": 1-required/result_before["packs_per_day"],
+            }
+        return {
+            **product, "intended_old": price.get("old"), "intended_new": price.get("new"),
+            "before": result_before, "after": result_after,
+            "elasticity": elasticity, "sparse": result_before["packs"] < 10 or result_after["packs"] < 10,
+            "last_old": last_old, "first_new": first_new,
+            "inventory_available": inv.get("available"), "inventory_date": inv.get("snapshot_date"),
+            "inventory_flag": inv.get("available") is not None and inv.get("available") <= 5,
+            "scenario": scenario,
+            "mapping_warning": product["asin"] == PRICE_CHANGE_MAPPING_WARNING_ASIN,
+        }
+
+    asin_rows = [comparison_for(product) for product in products]
+
+    def grouped(key):
+        values = []
+        for label in sorted({key(product) for product in products}):
+            asins = {product["asin"] for product in products if key(product) == label}
+            entries = [row for row in order_rows if row["asin"] in asins]
+            b = stats(entries, set(before_dates)); a = stats(entries, set(after_dates))
+            b["pack_share"] = b["packs"]/before["packs"] if before["packs"] else None
+            a["pack_share"] = a["packs"]/after["packs"] if after["packs"] else None
+            values.append({"label": label, "before": b, "after": a})
+        return values
+
+    pack_rows = grouped(lambda product: product["pack_type"])
+    variant_rows = grouped(lambda product: f'{product["pack_type"]} · {product["color"]} · {product["size"]}')
+    daily_start = min(PRICE_CHANGE_PROMOTION_DAYS)
+    daily = []
+    cursor = daily_start
+    while completed_through and cursor <= completed_through:
+        row = stats(order_rows, {cursor})
+        row.update(day=cursor.isoformat(), is_transition=cursor == PRICE_CHANGE_DATE,
+                   known_promotion=cursor in PRICE_CHANGE_PROMOTION_DAYS,
+                   ad_spend=(ppc_by_day.get(cursor) or {}).get("spend"))
+        daily.append(row); cursor += timedelta(days=1)
+    for index, row in enumerate(daily):
+        prior_spend = daily[index-1]["ad_spend"] if index else None
+        row["ad_change"] = ((row["ad_spend"]-prior_spend)/prior_spend
+                            if row["ad_spend"] is not None and prior_spend else None)
+        row["ad_change_flag"] = row["ad_change"] is not None and abs(row["ad_change"]) >= .25
+
+    evidence_rows = [row for row in asin_rows if row["pack_type"] != "6-pack"]
+    earliest_new = min((row["first_new"] for row in evidence_rows if row["first_new"]),
+                       key=lambda row: row["purchase_timestamp"], default=None)
+    latest_old = max((row["last_old"] for row in evidence_rows if row["last_old"]),
+                     key=lambda row: row["purchase_timestamp"], default=None)
+    changed_with_sales = [row for row in evidence_rows if row["before"]["packs"] or row["after"]["packs"]]
+    elasticity_rows = [row for row in evidence_rows if row["elasticity"] is not None]
+    conclusion = "Too early to decide"
+    if len(after_dates) >= 7 and after["contribution_per_day"] is not None:
+        conclusion = ("Contribution dollars improved" if before["contribution_per_day"] is not None
+                      and after["contribution_per_day"] > before["contribution_per_day"]
+                      else "Contribution dollars have not improved")
+    opportunities = [
+        {
+            "title": "Complete the first seven post-change days",
+            "evidence": f'{len(after_dates)} completed post-change day(s) are loaded; {after["packs"]:g} packs observed.',
+            "next": "Recheck after seven completed Pacific days before making another price decision.",
+        },
+        {
+            "title": "Resolve the Black L/XL pack definition",
+            "evidence": "B0FFQ5Z8CS is labeled 2-pack publicly but maps to 3 physical pairs in dim_product.",
+            "next": "Confirm listing contents and correct the source mapping before pair-level decisions.",
+        },
+        {
+            "title": "Wait for exact post-change fees",
+            "evidence": f'Exact fee coverage is {after["exact_fee_coverage"] or 0:.0%}; estimates fill only documented component coverage.',
+            "next": "Reconcile settlement fees and returns before treating contribution as final.",
+        },
+    ]
+    return {
+        "event_date": PRICE_CHANGE_DATE.isoformat(), "exact_time_known": False,
+        "window": window, "include_transition": include_transition,
+        "completed_through": completed_through.isoformat() if completed_through else None,
+        "latest_order_timestamp": latest_order_timestamp, "ppc_cutoff": ppc_cutoff,
+        "traffic_cutoff": traffic["cutoff"] if traffic else None,
+        "traffic_snapshots": traffic["snapshots"] if traffic else 0,
+        "refund_cutoff": refund_cutoff,
+        "before_dates": [day.isoformat() for day in before_dates],
+        "after_dates": [day.isoformat() for day in after_dates],
+        "before": before, "after": after, "conclusion": conclusion,
+        "asin_rows": asin_rows, "pack_rows": pack_rows, "variant_rows": variant_rows,
+        "daily": daily, "earliest_new": earliest_new, "latest_old": latest_old,
+        "changed_with_sales": len(changed_with_sales), "elasticity_rows": elasticity_rows,
+        "opportunities": opportunities,
+        "promotion_days": sorted(day.isoformat() for day in PRICE_CHANGE_PROMOTION_DAYS),
+        "cogs_note": "$2.59 per physical pair · owner-confirmed US landed cost · not invoice-verified",
+        "traffic_note": "Business Traffic is cumulative. The selected matched dates do not have compatible boundary snapshots, so sessions and units/session are unavailable rather than summed.",
+        "ppc_note": "PPC is brand-level context only; campaign, target and search-term data does not provide reliable ASIN attribution.",
+        "refund_note": "Refunds are settlement-posted, not order-cohort matched; they are excluded from this early contribution comparison.",
+        "mix_warning": "Aggregate pack/color/size elasticity is suppressed because simultaneous price changes and changing composition confound the coefficient.",
+    }
 
 
 def prime_big_deals_performance():
