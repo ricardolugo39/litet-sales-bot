@@ -92,14 +92,16 @@ def midpoint_arc_elasticity(before_quantity, after_quantity,
     return quantity_change / price_change
 
 
-def price_change_performance(window=7, include_transition=False):
+def price_change_performance(window=7, include_transition=True,
+                             baseline_mode="weekday4"):
     """Describe the October 17 Litet price change without claiming causality.
 
-    The comparison uses completed Pacific days only. Each available post-change
-    day is paired with the same weekday four weeks earlier, keeping raw day
-    counts equal even while the 7/14/28-day views are still filling in.
+    The default comparison uses completed Pacific days only and weights all four
+    pre-event occurrences of each post-period weekday. A one-to-one date match
+    remains available as an explicitly labeled alternative.
     """
     window = window if window in {7, 14, 28} else 7
+    baseline_mode = baseline_mode if baseline_mode in {"weekday4", "equal"} else "weekday4"
     with connect() as conn:
         conn.create_function("amazon_us_date", 1, amazon_us_date)
         products = [dict(row) for row in conn.execute(
@@ -115,11 +117,17 @@ def price_change_performance(window=7, include_transition=False):
                JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
                WHERE p.canonical_brand='Litet'"""
         ).fetchone()[0]
+        latest_order_imported_at = conn.execute(
+            """SELECT MAX(o.imported_at) FROM orders o
+               JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
+               WHERE p.canonical_brand='Litet'"""
+        ).fetchone()[0]
         latest_order_day = (date.fromisoformat(amazon_us_date(latest_order_timestamp))
                             if latest_order_timestamp else None)
         today_pacific = datetime.now(ZoneInfo("America/Los_Angeles")).date()
-        completed_through = min(latest_order_day, today_pacific - timedelta(days=1)) \
-            if latest_order_day else None
+        # Calendar elapsed is not an ingestion-completeness claim. Do not use
+        # the latest sale timestamp as a synthetic source watermark.
+        completed_through = today_pacific - timedelta(days=1)
         after_start = PRICE_CHANGE_DATE if include_transition else PRICE_CHANGE_DATE + timedelta(days=1)
         intended_after_end = after_start + timedelta(days=window - 1)
         after_end = min(intended_after_end, completed_through) if completed_through else None
@@ -127,7 +135,22 @@ def price_change_performance(window=7, include_transition=False):
         if after_end and after_end >= after_start:
             after_dates = [after_start + timedelta(days=offset)
                            for offset in range((after_end-after_start).days+1)]
-        before_dates = [day - timedelta(days=28) for day in after_dates]
+        after_date_weights = {day: 1.0 for day in after_dates}
+        if baseline_mode == "equal":
+            before_date_weights = {day - timedelta(days=28): 1.0
+                                   for day in after_dates}
+        else:
+            baseline_pool = [PRICE_CHANGE_DATE - timedelta(days=offset)
+                             for offset in range(1, 29)]
+            weekday_counts = {}
+            for day in after_dates:
+                weekday_counts[day.weekday()] = weekday_counts.get(day.weekday(), 0) + 1
+            before_date_weights = {}
+            for weekday, exposure in weekday_counts.items():
+                matches = [day for day in baseline_pool if day.weekday() == weekday]
+                for day in matches:
+                    before_date_weights[day] = exposure / len(matches)
+        before_dates = sorted(before_date_weights)
 
         order_rows = [dict(row) for row in conn.execute(
             """SELECT o."amazon-order-id" order_id,o.asin,
@@ -242,24 +265,35 @@ def price_change_performance(window=7, include_transition=False):
                                if row["cogs"] is not None and row["fee"] is not None
                                else None)
 
-    def stats(entries, days):
-        selected = [row for row in entries if row["sale_date"] in days]
-        day_count = len(days)
-        packs = sum(row["packs"] for row in selected)
-        pairs = sum(row["pairs"] for row in selected)
-        revenue = sum(row["revenue"] for row in selected)
+    def stats(entries, date_weights):
+        selected = [row for row in entries if row["sale_date"] in date_weights]
+        day_count = sum(date_weights.values())
+        raw_day_count = len(date_weights)
+        weighted = lambda row, field: row[field] * date_weights[row["sale_date"]]
+        packs = sum(weighted(row, "packs") for row in selected)
+        pairs = sum(weighted(row, "pairs") for row in selected)
+        revenue = sum(weighted(row, "revenue") for row in selected)
         contribution_rows = [row for row in selected if row["contribution"] is not None]
-        contribution = sum(row["contribution"] for row in contribution_rows)
-        fee_revenue = sum(row["revenue"] for row in selected if row["fee_method"] == "exact")
-        estimated_revenue = sum(row["revenue"] for row in selected if row["fee_method"] == "estimated")
+        contribution = sum(weighted(row, "contribution") for row in contribution_rows)
+        fee_revenue = sum(weighted(row, "revenue") for row in selected if row["fee_method"] == "exact")
+        estimated_revenue = sum(weighted(row, "revenue") for row in selected if row["fee_method"] == "estimated")
         statuses = {}
         for row in selected:
-            statuses[row["order_status"]] = statuses.get(row["order_status"], 0) + row["packs"]
+            statuses[row["order_status"]] = (statuses.get(row["order_status"], 0)
+                                               + weighted(row, "packs"))
         return {
             "days": day_count,
-            "start": min(days).isoformat() if days else None,
-            "end": max(days).isoformat() if days else None,
-            "packs": packs, "pairs": pairs, "revenue": revenue,
+            "raw_days": raw_day_count,
+            "start": min(date_weights).isoformat() if date_weights else None,
+            "end": max(date_weights).isoformat() if date_weights else None,
+            "packs": sum(row["packs"] for row in selected),
+            "pairs": sum(row["pairs"] for row in selected),
+            "revenue": sum(row["revenue"] for row in selected),
+            "raw_packs": sum(row["packs"] for row in selected),
+            "raw_pairs": sum(row["pairs"] for row in selected),
+            "raw_revenue": sum(row["revenue"] for row in selected),
+            "weighted_packs": packs, "weighted_pairs": pairs,
+            "weighted_revenue": revenue,
             "packs_per_day": packs/day_count if day_count else None,
             "pairs_per_day": pairs/day_count if day_count else None,
             "revenue_per_day": revenue/day_count if day_count else None,
@@ -270,13 +304,13 @@ def price_change_performance(window=7, include_transition=False):
             "contribution_per_pack": contribution/packs if packs and len(contribution_rows) == len(selected) else None,
             "exact_fee_coverage": fee_revenue/revenue if revenue else None,
             "estimated_fee_coverage": estimated_revenue/revenue if revenue else None,
-            "promoted_packs": sum(row["packs"] for row in selected if row["promoted"]),
+            "promoted_packs": sum(weighted(row, "packs") for row in selected if row["promoted"]),
             "statuses": statuses,
             "raw_orders": len({row["order_id"] for row in selected}),
         }
 
-    before = stats(order_rows, set(before_dates))
-    after = stats(order_rows, set(after_dates))
+    before = stats(order_rows, before_date_weights)
+    after = stats(order_rows, after_date_weights)
 
     def traffic_interval(days):
         """Difference compatible cumulative snapshots for one contiguous interval."""
@@ -310,18 +344,24 @@ def price_change_performance(window=7, include_transition=False):
                 "units_per_session": units/sessions if sessions else None,
                 "start_snapshot": boundary.isoformat(), "end_snapshot": end.isoformat()}
 
-    before["traffic"] = traffic_interval(before_dates)
+    before["traffic"] = (traffic_interval(before_dates)
+                         if baseline_mode == "equal" else None)
     after["traffic"] = traffic_interval(after_dates)
     ppc_by_day = {date.fromisoformat(row["sale_day"]): row for row in ppc_rows}
-    for result, days in ((before, before_dates), (after, after_dates)):
-        result["ad_spend"] = sum((ppc_by_day.get(day) or {}).get("spend") or 0 for day in days)
+    for result, weights in ((before, before_date_weights), (after, after_date_weights)):
+        result["ad_spend"] = sum(((ppc_by_day.get(day) or {}).get("spend") or 0) * weight
+                                 for day, weight in weights.items())
         result["contribution_after_ads"] = (result["contribution"]-result["ad_spend"]
                                             if result["contribution"] is not None else None)
+        result["contribution_after_ads_per_day"] = (
+            result["contribution_after_ads"] / result["days"]
+            if result["contribution_after_ads"] is not None and result["days"] else None
+        )
 
     def comparison_for(product):
         entries = [row for row in order_rows if row["asin"] == product["asin"]]
-        result_before = stats(entries, set(before_dates))
-        result_after = stats(entries, set(after_dates))
+        result_before = stats(entries, before_date_weights)
+        result_after = stats(entries, after_date_weights)
         price = PRICE_CHANGE_PRICES.get(product["pack_type"], {})
         elasticity = midpoint_arc_elasticity(
             result_before["packs_per_day"], result_after["packs_per_day"],
@@ -357,7 +397,7 @@ def price_change_performance(window=7, include_transition=False):
         return {
             **product, "intended_old": price.get("old"), "intended_new": price.get("new"),
             "before": result_before, "after": result_after,
-            "elasticity": elasticity, "sparse": result_before["packs"] < 10 or result_after["packs"] < 10,
+            "elasticity": elasticity, "sparse": result_before["raw_packs"] < 10 or result_after["raw_packs"] < 10,
             "last_old": last_old, "first_new": first_new,
             "inventory_available": inv.get("available"), "inventory_date": inv.get("snapshot_date"),
             "inventory_flag": inv.get("available") is not None and inv.get("available") <= 5,
@@ -372,19 +412,30 @@ def price_change_performance(window=7, include_transition=False):
         for label in sorted({key(product) for product in products}):
             asins = {product["asin"] for product in products if key(product) == label}
             entries = [row for row in order_rows if row["asin"] in asins]
-            b = stats(entries, set(before_dates)); a = stats(entries, set(after_dates))
-            b["pack_share"] = b["packs"]/before["packs"] if before["packs"] else None
-            a["pack_share"] = a["packs"]/after["packs"] if after["packs"] else None
+            b = stats(entries, before_date_weights); a = stats(entries, after_date_weights)
+            b["pack_share"] = (b["weighted_packs"]/before["weighted_packs"]
+                               if before["weighted_packs"] else None)
+            a["pack_share"] = (a["weighted_packs"]/after["weighted_packs"]
+                               if after["weighted_packs"] else None)
+            b["revenue_share"] = (b["weighted_revenue"]/before["weighted_revenue"]
+                                  if before["weighted_revenue"] else None)
+            a["revenue_share"] = (a["weighted_revenue"]/after["weighted_revenue"]
+                                  if after["weighted_revenue"] else None)
+            b["contribution_share"] = (b["contribution"]/before["contribution"]
+                                       if b["contribution"] is not None and before["contribution"] else None)
+            a["contribution_share"] = (a["contribution"]/after["contribution"]
+                                       if a["contribution"] is not None and after["contribution"] else None)
             values.append({"label": label, "before": b, "after": a})
         return values
 
     pack_rows = grouped(lambda product: product["pack_type"])
+    six_pack = next((row for row in pack_rows if row["label"] == "6-pack"), None)
     variant_rows = grouped(lambda product: f'{product["pack_type"]} · {product["color"]} · {product["size"]}')
     daily_start = min(PRICE_CHANGE_PROMOTION_DAYS)
     daily = []
     cursor = daily_start
     while completed_through and cursor <= completed_through:
-        row = stats(order_rows, {cursor})
+        row = stats(order_rows, {cursor: 1.0})
         row.update(day=cursor.isoformat(), is_transition=cursor == PRICE_CHANGE_DATE,
                    known_promotion=cursor in PRICE_CHANGE_PROMOTION_DAYS,
                    ad_spend=(ppc_by_day.get(cursor) or {}).get("spend"))
@@ -427,15 +478,24 @@ def price_change_performance(window=7, include_transition=False):
     return {
         "event_date": PRICE_CHANGE_DATE.isoformat(), "exact_time_known": False,
         "window": window, "include_transition": include_transition,
+        "baseline_mode": baseline_mode,
+        "baseline_label": ("Four-week weekday baseline" if baseline_mode == "weekday4"
+                           else "Equal-length one-to-one dates"),
         "completed_through": completed_through.isoformat() if completed_through else None,
         "latest_order_timestamp": latest_order_timestamp, "ppc_cutoff": ppc_cutoff,
+        "latest_order_imported_at": latest_order_imported_at,
         "traffic_cutoff": traffic["cutoff"] if traffic else None,
         "traffic_snapshots": traffic["snapshots"] if traffic else 0,
         "refund_cutoff": refund_cutoff,
         "before_dates": [day.isoformat() for day in before_dates],
+        "before_date_weights": [
+            {"day": day.isoformat(), "weight": weight}
+            for day, weight in sorted(before_date_weights.items())
+        ],
         "after_dates": [day.isoformat() for day in after_dates],
         "before": before, "after": after, "conclusion": conclusion,
         "asin_rows": asin_rows, "pack_rows": pack_rows, "variant_rows": variant_rows,
+        "six_pack": six_pack,
         "daily": daily, "earliest_new": earliest_new, "latest_old": latest_old,
         "changed_with_sales": len(changed_with_sales), "elasticity_rows": elasticity_rows,
         "opportunities": opportunities,

@@ -214,7 +214,7 @@ class DashboardTest(unittest.TestCase):
         result = price_change_performance(7, False)
         response = self.client.get("/price-change?window=7&transition=exclude")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(result["before_dates"]), len(result["after_dates"]))
+        self.assertEqual(result["before"]["days"], result["after"]["days"])
         self.assertEqual(len(result["asin_rows"]), 12)
         self.assertEqual(result["completed_through"], "2026-10-18")
         self.assertIn(b"Provisional\xe2\x80\x94not decision-ready", response.data)
@@ -230,13 +230,60 @@ class DashboardTest(unittest.TestCase):
         included = price_change_performance(14, True)
         self.assertNotIn("2026-10-17", excluded["after_dates"])
         self.assertIn("2026-10-17", included["after_dates"])
-        self.assertEqual(len(included["before_dates"]), len(included["after_dates"]))
+        self.assertEqual(included["before"]["days"], included["after"]["days"])
         self.assertTrue(any(row["after"]["packs"] == 0 for row in included["asin_rows"]))
         self.assertTrue(any(row["elasticity"] is None for row in included["asin_rows"]))
         response = self.client.get("/price-change?window=14&transition=include")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Include transition day", response.data)
         self.assertIn(b"No price change", response.data)
+
+    def test_price_change_four_week_weekday_weights_and_two_day_normalization(self):
+        from decision_dashboard_v2.analytics import price_change_performance
+
+        one_day = price_change_performance(7, False, "weekday4")
+        self.assertEqual(one_day["before_dates"], [
+            "2026-09-20", "2026-09-27", "2026-10-04", "2026-10-11",
+        ])
+        self.assertEqual([row["weight"] for row in one_day["before_date_weights"]],
+                         [.25, .25, .25, .25])
+        self.assertEqual(one_day["before"]["days"], 1)
+        self.assertEqual(one_day["before"]["raw_days"], 4)
+        self.assertNotEqual(one_day["before"]["raw_packs"],
+                            one_day["before"]["weighted_packs"])
+
+        two_day = price_change_performance(7, True, "weekday4")
+        self.assertEqual(len(two_day["before_dates"]), 8)
+        self.assertEqual(two_day["before"]["days"], 2)
+        self.assertTrue(all(day < "2026-10-17" for day in two_day["before_dates"]))
+        self.assertEqual(two_day["after"]["raw_packs"], 14)
+        self.assertAlmostEqual(two_day["after"]["raw_revenue"], 528.86)
+        self.assertEqual(two_day["after"]["packs_per_day"], 7)
+        self.assertAlmostEqual(two_day["after"]["revenue_per_day"], 264.43)
+        self.assertAlmostEqual(two_day["after"]["contribution_after_ads_per_day"],
+                               two_day["after"]["contribution_after_ads"] / 2)
+        self.assertEqual({row["label"]: row["after"]["raw_packs"]
+                          for row in two_day["pack_rows"]},
+                         {"single": 4, "3-pack": 9, "6-pack": 1})
+        self.assertTrue(any(row["before"]["raw_packs"] == 0
+                            for row in two_day["asin_rows"]))
+
+    def test_price_change_default_includes_transition_and_equal_length_alternative(self):
+        from decision_dashboard_v2.analytics import price_change_performance
+
+        default = price_change_performance()
+        equal = price_change_performance(7, True, "equal")
+        self.assertTrue(default["include_transition"])
+        self.assertEqual(default["baseline_mode"], "weekday4")
+        self.assertEqual(equal["before_dates"], ["2026-09-19", "2026-09-20"])
+        response = self.client.get("/price-change")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"October 17 is included by default", response.data)
+        self.assertIn(b"Four-week weekday baseline", response.data)
+        self.assertIn(b"Six-pack growth objective", response.data)
+        self.assertIn(b"14 packs", response.data)
+        self.assertIn(b"Contribution after ads/day", response.data)
+        self.assertIn(b"ingestion completeness remains unverified", response.data)
 
     def test_prime_event_handles_asin_without_fee_history(self):
         from decision_dashboard_v2.analytics import prime_big_deals_performance

@@ -312,10 +312,11 @@ def price_change():
         window = int(request.args.get("window", "7"))
     except ValueError:
         window = 7
-    include_transition = request.args.get("transition", "exclude") == "include"
+    include_transition = request.args.get("transition", "include") == "include"
+    baseline_mode = request.args.get("baseline", "weekday4")
     return render_template(
         "price_change.html", page="price_change",
-        analysis=price_change_performance(window, include_transition),
+        analysis=price_change_performance(window, include_transition, baseline_mode),
     )
 
 @app.get("/decisions")
