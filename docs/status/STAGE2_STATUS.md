@@ -117,6 +117,10 @@ The seed is idempotent and will not replace a current vendor-receipt cost.
 
 ## Remaining limitations
 
+- Planned for the next inventory order: add an owner-facing COGS module that
+  records the new order/batch and its landed-cost provenance before updating
+  the moving average. This request is documented only; no new module is built
+  in the current provenance correction.
 - The inventory input is a periodic latest snapshot, not a perpetual inventory ledger. Moving-average accuracy depends on that snapshot representing on-hand units appropriately when the receipt is posted.
 - The receipt command currently supports one receipt at a time. CSV batch import and an owner-facing entry form are not yet implemented.
 - Historical sales before `2026-05-01` remain explicitly missing unless the owner approves an earlier placeholder effective date or supplies historical batch costs.
