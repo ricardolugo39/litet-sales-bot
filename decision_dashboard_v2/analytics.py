@@ -6,6 +6,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
+if __package__:
+    from .reporting_dates import amazon_us_reporting_date
+else:
+    from reporting_dates import amazon_us_reporting_date
 
 if __package__:
     from .competitor_data import CAPTURED_AT, HAS10_KEYWORDS_CAPTURED_AT, HAS10_KEYWORD_OPPORTUNITIES, LITET_KEYWORDS_CAPTURED_AT, LITET_KEYWORD_HISTORY, LITET_PARENT_KEYWORD_OPPORTUNITIES, MARKET_SNAPSHOTS
@@ -29,6 +33,7 @@ def database_path():
 def connect():
     conn = sqlite3.connect(database_path())
     conn.row_factory = sqlite3.Row
+    conn.create_function("amazon_us_date", 1, amazon_us_reporting_date, deterministic=True)
     return conn
 
 
@@ -579,7 +584,9 @@ def cost_diagnosis(period_start, period_end, brand):
     data["amazon_ex_ads"]=data["fulfillment"]+data["referral"]+data["refund_admin"]+data["other"]
     data["pre_ad_contribution"]=sales-data["amazon_ex_ads"]-data["cogs"]
     data["break_even_ad_spend"]=max(data["pre_ad_contribution"],0)
-    data["break_even_tacos"]=data["break_even_ad_spend"]/ordered if ordered else None
+    # Ads and contribution above are settled/net economics. Label and compute
+    # their break-even percentage on the same net-sales denominator.
+    data["break_even_tacos"]=data["break_even_ad_spend"]/sales if sales else None
     data["ad_reduction_to_break_even"]=max(data["ads"]-data["break_even_ad_spend"],0)
     data["ad_reduction_pct"]=data["ad_reduction_to_break_even"]/data["ads"] if data["ads"] else None
     data["ten_pct_margin_ad_spend"]=max(data["pre_ad_contribution"]-sales*.10,0)
@@ -625,21 +632,21 @@ def monthly_trend(brand):
             f"""
             WITH latest AS (
               SELECT MIN(
-                (SELECT MAX(date(substr("purchase-date",1,10))) FROM orders),
+                (SELECT MAX(amazon_us_date("purchase-date")) FROM orders),
                 (SELECT MAX(date(report_date)) FROM ppc_fact_clean)
               ) max_date
             ), sales AS (
-              SELECT substr(o."purchase-date",1,7) month,
+              SELECT substr(amazon_us_date(o."purchase-date"),1,7) month,
                      SUM(CAST(o.quantity AS REAL)) units,
                      SUM(CAST(o."item-price" AS REAL)
                          - COALESCE(CAST(o."item-promotion-discount" AS REAL),0)) ordered_sales
               FROM orders o JOIN dim_product p ON p.asin=o.asin, latest
-              WHERE date(substr(o."purchase-date",1,10)) <= latest.max_date
-                AND substr(o."purchase-date",1,4) = substr(latest.max_date,1,4)
+              WHERE amazon_us_date(o."purchase-date") <= latest.max_date
+                AND substr(amazon_us_date(o."purchase-date"),1,4) = substr(latest.max_date,1,4)
                 AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
                 AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')
                 AND {order_where}
-              GROUP BY substr(o."purchase-date",1,7)
+              GROUP BY substr(amazon_us_date(o."purchase-date"),1,7)
             ), ads AS (
               SELECT substr(report_date,1,7) month, SUM(spend) ad_spend
               FROM ppc_fact_clean, latest
@@ -695,14 +702,14 @@ def seasonality_matrix(brand, asin=None):
     asin_filter="AND o.asin=?" if asin else ""
     asin_params=[asin] if asin else []
     with connect() as conn:
-        rows=conn.execute(f"""SELECT substr(o."purchase-date",1,4) year,
-                  substr(o."purchase-date",6,2) month,
+        rows=conn.execute(f"""SELECT substr(amazon_us_date(o."purchase-date"),1,4) year,
+                  substr(amazon_us_date(o."purchase-date"),6,2) month,
                   SUM(CAST(o.quantity AS REAL)) units,
                   SUM(CAST(o.quantity AS REAL) * COALESCE(p.units_per_sellable_unit,1)) physical_units
           FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
           WHERE {where} {asin_filter} AND o."order-status" NOT IN ('Cancelled','Pending')
           GROUP BY 1,2 ORDER BY 1,2""",[*params,*asin_params]).fetchall()
-        latest=conn.execute(f"""SELECT MAX(substr(o."purchase-date",1,10)) latest_date
+        latest=conn.execute(f"""SELECT MAX(amazon_us_date(o."purchase-date")) latest_date
           FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
           WHERE {where} {asin_filter} AND o."order-status" NOT IN ('Cancelled','Pending')""",
           [*params,*asin_params]).fetchone()["latest_date"]
@@ -899,19 +906,22 @@ def product_portfolio(period_start, period_end, brand):
         row["is_ppc_hero"] = bool(hero and row["asin"] == hero["asin"])
         row["is_ppc_test_candidate"] = bool(candidate and row["asin"] == candidate["asin"])
         row["average_order_value"] = row["ordered_sales"] / row["units"] if row["units"] else None
-        price_label = f"${row['average_order_value']:.2f}" if row["average_order_value"] else "the current price"
+        price_label = (
+            f"the ${row['average_order_value']:.2f} selected-period average realized revenue per package"
+            if row["average_order_value"] else "the observed offer"
+        )
         if row["inventory"] <= 0 and row["units"] > 0:
             row["pricing_action"] = "Hold price; a price test is invalid while inventory is unavailable."
             row["ppc_action"] = "Do not send additional paid traffic until FBA availability is restored."
             row["measurement_plan"] = "After restock, require 7 complete days of sessions, units and conversion before changing either lever."
         elif row["is_ppc_hero"]:
             row["status_reason"] = (f"This ASIN carries the largest allocated ad charge and {row['units']:.0f} selected-period orders, so it remains the control for PPC changes.")
-            row["pricing_action"] = f"Hold approximately {price_label}; selected-period settlement does not support a price cut."
+            row["pricing_action"] = f"Do not change price from {price_label}; selected-period settlement does not support a price cut."
             row["ppc_action"] = "Keep this ASIN as the primary PPC destination. Change only the campaign targets identified on the PPC page—not the entire campaign."
             row["measurement_plan"] = "For each target change, compare 7 complete days of total units, sessions, CVR, organic rank and contribution; confirm at 14 days."
         elif row["is_ppc_test_candidate"]:
             row["status_reason"] = (f"It converted {(row['conversion'] or 0):.1%} from {row['sessions']:.0f} sessions and has approximately {row['days_cover']:.0f} days of cover—the strongest same-pack candidate outside the hero.")
-            row["pricing_action"] = f"Hold approximately {price_label} so the PPC test has one changing variable."
+            row["pricing_action"] = f"Do not change price from {price_label} while the PPC test runs."
             row["ppc_action"] = f"Test as a secondary advertised ASIN with 10–15% of the hero budget using EXACT {term_names}."
             row["measurement_plan"] = "Run 7 complete days. Expand only if incremental sessions convert without reducing hero-ASIN units or total contribution."
         elif row["sessions"] >= 40 and (row["conversion"] or 0) < .03:
@@ -1301,14 +1311,14 @@ def ppc_organic_trend(brand):
                 "sample_months":0,"analysis_start":None,"analysis_end":None,
                 "definition":"Select Litet or Has10 to calculate brand-level PPC and non-ad-unit relationships."}
     with connect() as conn:
-        orders = conn.execute("""SELECT substr(o."purchase-date",1,7) month,SUM(CAST(o.quantity AS REAL)) total_units
+        orders = conn.execute("""SELECT substr(amazon_us_date(o."purchase-date"),1,7) month,SUM(CAST(o.quantity AS REAL)) total_units
           FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1
           WHERE p.canonical_brand=? AND o."order-status" NOT IN ('Cancelled','Pending')
           GROUP BY 1 ORDER BY 1""",(brand,)).fetchall()
         ads = conn.execute("""SELECT substr(report_date,1,7) month,SUM(ad_units) ad_units,SUM(spend) spend,SUM(ad_sales) ad_sales
           FROM ppc_fact_clean WHERE brand=? GROUP BY 1 ORDER BY 1""",(brand,)).fetchall()
         freshness = conn.execute("""SELECT
-          (SELECT MAX(substr(o."purchase-date",1,10)) FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1 WHERE p.canonical_brand=?) latest_order,
+          (SELECT MAX(amazon_us_date(o."purchase-date")) FROM orders o JOIN dim_product p ON p.asin=o.asin AND p.is_current=1 WHERE p.canonical_brand=?) latest_order,
           (SELECT MAX(report_date) FROM ppc_fact_clean WHERE brand=?) latest_ppc""",(brand,brand)).fetchone()
     merged={r["month"]:{"month":r["month"],"total_units":r["total_units"] or 0,"ad_units":0,"spend":0,"ad_sales":0} for r in orders}
     for r in ads:
@@ -1617,7 +1627,7 @@ def executive_actions(period_start, period_end, brand, ranked_actions):
         if blue_generic:
             steps.append({"action":"Reduce Blue ‘cleat covers’ PHRASE by 20%; preserve its youth queries.",
                           "why":f"The generic query is at {pct(blue_generic['acos'])} ACoS, but ‘youth cleat covers’ and ‘cleat covers youth’ are converting. Use a small cut to avoid suppressing qualified seasonal demand."})
-        steps.append({"action":"Keep the $13.99 base price; do not answer the current profit pressure with a broad price cut.",
+        steps.append({"action":"Do not answer the current profit pressure with a broad price change.",
                       "why":"Has10 is already below the $15.49 direct-competitor median. Current contribution is being pressured by advertising allocation, while total August demand is accelerating versus the preceding period."})
         if urgent:
             steps.append(replenish_step)
@@ -1647,7 +1657,7 @@ def executive_actions(period_start, period_end, brand, ranked_actions):
     with connect() as conn:
         prior_sales=conn.execute("""SELECT COALESCE(SUM(CAST(o."item-price" AS REAL)-COALESCE(CAST(o."item-promotion-discount" AS REAL),0)),0)
           FROM orders o JOIN dim_product p ON p.asin=o.asin
-          WHERE date(substr(o."purchase-date",1,10)) BETWEEN ? AND ? AND p.canonical_brand=?
+          WHERE amazon_us_date(o."purchase-date") BETWEEN ? AND ? AND p.canonical_brand=?
             AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
             AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')""",
           (prior_start.isoformat(),prior_end.isoformat(),brand)).fetchone()[0]
@@ -1656,7 +1666,7 @@ def executive_actions(period_start, period_end, brand, ranked_actions):
           GROUP BY campaign_name ORDER BY spend DESC""",(brand,current_start,current_end)).fetchall()
         inventory=conn.execute("""WITH latest AS (SELECT MAX(snapshot_date) d FROM inventory_snapshots),
           inv AS (SELECT i.asin,SUM(CAST(i."Quantity Available" AS REAL)) qty FROM inventory_snapshots i,latest WHERE i.snapshot_date=latest.d GROUP BY i.asin),
-          sales AS (SELECT o.asin,SUM(CAST(o.quantity AS REAL)) units FROM orders o WHERE date(substr(o."purchase-date",1,10)) BETWEEN date(?,'-29 days') AND ? AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled') GROUP BY o.asin)
+          sales AS (SELECT o.asin,SUM(CAST(o.quantity AS REAL)) units FROM orders o WHERE amazon_us_date(o."purchase-date") BETWEEN date(?,'-29 days') AND ? AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled') GROUP BY o.asin)
           SELECT p.color,p.size,p.pack_type,inv.qty,30.0*sales.units/30.0 velocity,CASE WHEN sales.units>0 THEN inv.qty/(sales.units/30.0) END cover
           FROM inv JOIN dim_product p ON p.asin=inv.asin JOIN sales ON sales.asin=inv.asin
           WHERE p.canonical_brand=? ORDER BY cover LIMIT 1""",(current_end,current_end,brand)).fetchone()
@@ -1761,7 +1771,7 @@ def pricing_case(period_start, period_end, brand, asin=None):
           COALESCE((SELECT unit_cogs FROM cogs_ledger c WHERE c.asin=? AND c.effective_start<=? AND (c.effective_end IS NULL OR c.effective_end>=?) ORDER BY c.effective_start DESC LIMIT 1),0) unit_cogs
           FROM asin_economics WHERE asin=? AND period_start>=? AND period_end<=? GROUP BY asin""",
           (product["asin"],period_end,period_start,product["asin"],period_start,period_end)).fetchone()
-        history=conn.execute("""SELECT substr("purchase-date",1,7) month,SUM(CAST(quantity AS REAL)) units,
+        history=conn.execute("""SELECT substr(amazon_us_date("purchase-date"),1,7) month,SUM(CAST(quantity AS REAL)) units,
           SUM(CAST("item-price" AS REAL)-COALESCE(CAST("item-promotion-discount" AS REAL),0)) sales
           FROM orders WHERE asin=? AND "order-status" NOT IN ('Cancelled','Pending') GROUP BY 1 HAVING SUM(CAST(quantity AS REAL))>0 ORDER BY 1""",(product["asin"],)).fetchall()
         settled_history=conn.execute("""SELECT period_start,period_end,average_sales_price,units_sold,units_returned,
@@ -1779,6 +1789,8 @@ def pricing_case(period_start, period_end, brand, asin=None):
           AND effective_start<=? AND (effective_end IS NULL OR effective_end>=?)
           ORDER BY effective_start DESC LIMIT 1""",(product["asin"],period_end,period_start)).fetchone()
     econ=dict(econ) if econ else {}; units=product["units"] or econ.get("units_sold") or 0
+    # This is realized revenue per package for the selected reporting period,
+    # not a live listing-price observation.
     current_price=product["ordered_sales"]/units if units else None; net_units=max(econ.get("net_units_sold") or units or 1,1); cogs=econ.get("unit_cogs") or 0
     current_contribution=(econ.get("net_proceeds") or product["net_proceeds"] or 0)-cogs*net_units; cpu=current_contribution/net_units
     referral=abs((econ.get("referral_fee") or 0)+(econ.get("referral_fee_refunds") or 0)); referral_rate=min(referral/(econ.get("net_sales") or product["net_sales"] or 1),.30)
@@ -1842,7 +1854,7 @@ def pricing_case(period_start, period_end, brand, asin=None):
     if len(price_levels)<3: data_quality.append("Historical price variation is insufficient to estimate elasticity reliably.")
     candidate=scenarios[1] if len(scenarios)>1 else None
     if historical_decision_ready:
-        verdict="Hold current price; historical evidence does not isolate price as the conversion cause"
+        verdict="Do not change price; historical evidence does not isolate price as the conversion cause"
     elif data_quality: verdict="Do not change price from this evidence alone"
     elif candidate and candidate.get("lift_needed") is not None and candidate["lift_needed"]>.35: verdict="Price drop is unlikely to preserve contribution"
     else: verdict="Controlled price test is financially plausible"
@@ -1852,10 +1864,12 @@ def pricing_case(period_start, period_end, brand, asin=None):
     price_gap=(current_price-benchmark["checkout"])/benchmark["checkout"] if current_price and benchmark and benchmark["checkout"] else None
     if historical_decision_ready:
         band_text="; ".join(f"${b['price']:.0f} months converted at {b['conversion']:.1%}" for b in price_bands)
-        next_step=f"Hold ${current_price:.2f}. Completed-month evidence does not support a discount: {band_text}. Monitor MTD returns until settlement catches up."
+        next_step=f"Do not infer a live price from the ${current_price:.2f} selected-period average. Completed-month evidence does not support a discount: {band_text}. Monitor MTD returns until settlement catches up."
     else:
         next_step="Do not launch this price test yet. Use a longer settled economics window or select a higher-volume SKU."
-    return {"product":product,"current_price":current_price,"current_units":net_units,"ordered_units":units,
+    return {"product":product,"current_price":current_price,"price_verified":False,
+            "price_basis":"selected-period average realized revenue per package",
+            "current_units":net_units,"ordered_units":units,
             "sold_units":sold_units,"returned_units":returned,"return_rate":return_rate,
             "current_contribution":current_contribution,"referral_rate":referral_rate,"scenarios":scenarios,
             "market":market,"price_benchmark":benchmark,"price_gap":price_gap,"price_history":price_history[-12:],"price_levels":len(price_levels),

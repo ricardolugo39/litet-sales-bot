@@ -35,8 +35,10 @@ Keep real values in `.env`; never commit them.
 1. Download Seller Central files into the existing OneDrive `Raw/incoming`
    directory.
 2. Run `python scripts/update_and_sync.py`.
-3. The established `update_all.py` pipeline imports the files and rebuilds PPC
-   analytics.
+3. The established `update_all.py` pipeline imports the files and rebuilds
+   Stage 1 dimensions/fees, Stage 2 profitability, and Stage 3 PPC analytics
+   in dependency order. Placeholder-seed costs remain unverified assumptions
+   until replaced by documented vendor receipts.
 4. The synchronization command validates the complete SQLite database, sends a
    gzip-compressed snapshot over HTTPS to the decision dashboard and, when
    `INVENTORY_APP_URL` is set, to the inventory app, then refreshes the offline

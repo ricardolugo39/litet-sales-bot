@@ -378,6 +378,8 @@ def pricing():
 
 @app.post("/decisions/pricing/approve")
 def approve_pricing():
+    if request.form.get("price_verified") != "true":
+        return ("A verified current Amazon price is required before a pricing case can be queued.", 400)
     record_pricing_case({"brand":request.form["brand"],"asin":request.form["asin"],
       "old_value":float(request.form["old_value"]),"new_value":float(request.form["new_value"]),
       "period_start":request.form["period_start"],"period_end":request.form["period_end"],

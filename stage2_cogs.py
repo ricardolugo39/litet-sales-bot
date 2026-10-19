@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from decision_dashboard_v2.reporting_dates import amazon_us_reporting_dates
+
 
 EXCLUDED_ASINS = {"XXXXXXXXX"}
 
@@ -233,7 +235,9 @@ def enrich_sales_with_asof_cogs(
     source = sales.copy().reset_index(drop=True)
     source["_sale_row"] = range(len(source))
     source["asin"] = source["asin"].fillna("").astype(str).str.strip()
-    source["sale_date"] = pd.to_datetime(source[sale_date_col], errors="coerce", utc=True)
+    # Amazon exports use UTC instants while Seller Central reports use Pacific
+    # calendar dates. Persist the reporting date for period reconciliation.
+    source["sale_date"] = amazon_us_reporting_dates(source[sale_date_col])
     source["quantity_n"] = pd.to_numeric(source["quantity"], errors="coerce")
     source["item_price_revenue"] = pd.to_numeric(source["item-price"], errors="coerce")
 
@@ -245,11 +249,11 @@ def enrich_sales_with_asof_cogs(
         source["cogs_amount"] = pd.NA
         return source
     ledger["effective_start_ts"] = pd.to_datetime(
-        ledger["effective_start"], errors="coerce", utc=True
-    )
+        ledger["effective_start"], errors="coerce"
+    ).dt.normalize()
     ledger["effective_end_ts"] = pd.to_datetime(
-        ledger["effective_end"], errors="coerce", utc=True
-    )
+        ledger["effective_end"], errors="coerce"
+    ).dt.normalize()
     candidates = source[["_sale_row", "asin", "sale_date"]].merge(ledger, on="asin", how="left")
     valid = candidates[
         candidates["effective_start_ts"].le(candidates["sale_date"])

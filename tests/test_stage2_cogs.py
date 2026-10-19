@@ -137,6 +137,22 @@ class Stage2CogsTests(unittest.TestCase):
         self.assertEqual(result.iloc[2]["unit_cogs"], 3)
         self.assertTrue(pd.isna(result.iloc[3]["cogs_amount"]))
 
+    def test_sale_date_uses_pacific_boundary_and_dst(self):
+        ledger = pd.DataFrame([{
+            "cogs_ledger_key": "seed", "asin": "A1", "unit_cogs": 2.0,
+            "effective_start": "2026-01-01", "effective_end": None,
+        }])
+        sales = pd.DataFrame([
+            {"asin": "A1", "purchase-date": "2026-10-17T02:44:16+00:00", "quantity": "1", "item-price": "10"},
+            {"asin": "A1", "purchase-date": "2026-03-08T09:30:00+00:00", "quantity": "1", "item-price": "10"},
+            {"asin": "A1", "purchase-date": "2026-03-08T10:30:00+00:00", "quantity": "1", "item-price": "10"},
+        ])
+        result = enrich_sales_with_asof_cogs(sales, ledger)
+        self.assertEqual(
+            result["sale_date"].dt.strftime("%Y-%m-%d").tolist(),
+            ["2026-10-16", "2026-03-08", "2026-03-08"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

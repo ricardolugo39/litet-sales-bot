@@ -21,14 +21,16 @@ except ImportError:  # Supports direct execution from this directory.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def refresh_ppc_analytics():
-    """Rebuild the clean PPC marts after a successful raw PPC import."""
-    print("\n--- Refreshing PPC analytics ---")
-    subprocess.run(
-        [sys.executable, "materialize_stage3.py"],
-        cwd=PROJECT_ROOT,
-        check=True,
+def refresh_analytics():
+    """Rebuild every dependent analytics mart after raw imports finish."""
+    stages = (
+        ("Stage 1 dimensions and fees", "materialize_stage1.py"),
+        ("Stage 2 COGS and profitability", "seed_stage2_cogs.py"),
+        ("Stage 3 PPC analytics", "materialize_stage3.py"),
     )
+    for label, script in stages:
+        print(f"\n--- Refreshing {label} ---")
+        subprocess.run([sys.executable, script], cwd=PROJECT_ROOT, check=True)
 
 
 def update_all():
@@ -46,7 +48,7 @@ def update_all():
     update_inventory()
 
     print("\n--- Updating PPC ---")
-    ppc_updated = update_ppc()
+    update_ppc()
 
     print("\n--- Updating business traffic ---")
     update_business_reports()
@@ -54,8 +56,7 @@ def update_all():
     print("\n--- Updating ASIN economics ---")
     update_asin_economics()
 
-    if ppc_updated:
-        refresh_ppc_analytics()
+    refresh_analytics()
 
     print("\n==============================")
     print("LITET DATABASE UPDATE COMPLETE")
