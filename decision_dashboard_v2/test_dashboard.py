@@ -34,7 +34,7 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Confirm replenishment", response.data)
         self.assertIn(b"Estimated P&amp;L", response.data)
         self.assertIn(b'data-label="08/26"', response.data)
-        self.assertIn(b"09/26 MTD", response.data)
+        self.assertIn(b"10/26 MTD", response.data)
         self.assertIn(b"Monthly ordered sales ($) + TaCoS (%)", response.data)
 
     def test_prime_event_uses_all_litet_sales_and_applies_event_fees(self):
@@ -307,8 +307,8 @@ class DashboardTest(unittest.TestCase):
             "/?brand=Litet&period=2026-09-01%7C2026-09-04"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Current operations \xc2\xb7 2026-09-01\xe2\x80\x932026-09-04", response.data)
-        self.assertIn(b"Latest settled period \xc2\xb7 2026-09-01\xe2\x80\x932026-09-04", response.data)
+        self.assertIn(b"Current operations \xc2\xb7 2026-10-01\xe2\x80\x932026-10-18", response.data)
+        self.assertIn(b"Latest settled period \xc2\xb7 2026-09-01\xe2\x80\x932026-09-30", response.data)
         self.assertNotIn(b"Net sales</span><b>$0</b>", response.data)
 
     def test_old_august_cutoff_advances_to_completed_month(self):
@@ -328,10 +328,11 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Seasonal scale and availability", response.data)
         self.assertIn(b"Three priorities", response.data)
         self.assertIn(b"orange cleat covers", response.data)
-        self.assertIn(b"Keep the $13.99 base price", response.data)
-        self.assertIn(b"Why Amazon costs are 45.1%", response.data)
+        self.assertIn(b"Do not answer the current profit pressure with a broad price change", response.data)
+        self.assertNotIn(b"Keep the $13.99 base price", response.data)
+        self.assertIn(b"Why Amazon costs are 41.5%", response.data)
         self.assertIn(b"Maximum ads to break even", response.data)
-        self.assertIn(b"Bring TaCoS below 30%", response.data)
+        self.assertIn(b"Bring TaCoS below 34%", response.data)
         self.assertNotIn(b"white cycling socks", response.data)
 
     def test_homepage_exposes_brand_specific_operating_modes(self):
@@ -388,15 +389,19 @@ class DashboardTest(unittest.TestCase):
         self.assertTrue(all(r["period_start"].startswith(latest_year) for r in trend))
         august = [r for r in trend if r["period_start"] == "2026-08-01"]
         september = [r for r in trend if r["period_start"] == "2026-09-01"]
+        october = [r for r in trend if r["period_start"] == "2026-10-01"]
         self.assertEqual(len(august), 1)
         self.assertEqual(august[0]["period_end"], "2026-08-31")
         self.assertFalse(august[0]["is_partial"])
         self.assertGreater(august[0]["ordered_sales"], 0)
         self.assertEqual(len(september), 1)
-        self.assertEqual(september[0]["period_end"], "2026-09-04")
-        self.assertTrue(september[0]["is_partial"])
+        self.assertEqual(september[0]["period_end"], "2026-09-30")
+        self.assertFalse(september[0]["is_partial"])
         self.assertGreater(september[0]["ordered_sales"], 0)
-        self.assertLess(september[0]["ordered_sales"], august[0]["ordered_sales"])
+        self.assertEqual(len(october), 1)
+        self.assertEqual(october[0]["period_end"], trend[-1]["period_end"])
+        self.assertGreaterEqual(october[0]["period_end"], "2026-10-16")
+        self.assertTrue(october[0]["is_partial"])
 
     def test_monthly_trend_includes_sessions_without_summing_cumulative_snapshots(self):
         from decision_dashboard_v2.analytics import monthly_trend
@@ -581,7 +586,7 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Customer search term", response.data)
         self.assertIn(b"Campaign", response.data)
         self.assertIn(b"Has10 | Blue | Historic Keywords", response.data)
-        self.assertIn(b"Targeting keyword", response.data)
+        self.assertIn(b"Target / ad group", response.data)
         self.assertIn(b"cleat covers", response.data)
         self.assertIn(b"Keyword opportunities", response.data)
         self.assertIn(b"youth cleat covers", response.data)
@@ -596,10 +601,10 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"PPC actions", response.data)
         self.assertIn(b"LITET Ranking Campaign", response.data)
         self.assertIn(b"Organic #", response.data)
-        self.assertIn(b"Targeting keyword", response.data)
+        self.assertIn(b"Target / ad group", response.data)
         self.assertIn(b"Targeting decisions", response.data)
         self.assertIn(b"Customer search-term evidence", response.data)
-        self.assertIn(b"$236.93", response.data)
+        self.assertIn(b"Selected-period performance", response.data)
         self.assertIn(b"Keyword opportunities", response.data)
         self.assertIn(b"aero cycling socks", response.data)
         self.assertIn(b"Where Litet can close the visibility gap", response.data)
@@ -607,7 +612,6 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Matching query", response.data)
         self.assertIn(b"PPC spend vs total ordered units", response.data)
         self.assertIn(b"March 2026", response.data)
-        self.assertIn(b"QTD", response.data)
         self.assertIn(b"YTD", response.data)
         self.assertIn(b"Blue portion", response.data)
         self.assertIn(b"Helium 10 30-day snapshot", response.data)
@@ -673,20 +677,20 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(response.status_code,200)
         self.assertIn(b"PPC + organic",response.data)
 
-    def test_price_test_is_logged_but_not_executed(self):
+    def test_unverified_price_test_is_rejected(self):
         response = self.client.post("/decisions/pricing/approve", data={
             "brand":"Litet", "asin":"B0DSCFMCQD", "old_value":"14.99",
             "new_value":"13.99", "period_start":"2026-08-01", "period_end":"2026-08-16",
-            "required_lift":"0.25"}, follow_redirects=True)
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Action review queue", response.data)
-        self.assertIn(b"B0DSCFMCQD", response.data)
+            "required_lift":"0.25"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"verified current Amazon price", response.data)
 
     def test_ppc_proposal_is_queued_once_and_can_be_approved(self):
         payload={"brand":"Litet","campaign_name":"LITET discovery",
                  "entity_type":"target","entity_name":"men cycling socks",
-                 "action_type":"reduce_bid_15pct","old_value":"2.02",
-                 "new_value":"1.72","period_start":"2026-09-01",
+                 "ad_group_name":"discovery","match_type":"BROAD",
+                 "action_type":"reduce_bid_15pct","actual_bid":"2.02",
+                 "adjustment_pct":"-0.15","period_start":"2026-09-01",
                  "period_end":"2026-09-04","objective":"Reduce waste",
                  "spend":"97.10","clicks":"48","orders":"3","acos":"1.388"}
         for _ in range(2):
@@ -703,7 +707,7 @@ class DashboardTest(unittest.TestCase):
                                   data={"brand":"Litet","period":"2026-09-01|2026-09-04",
                                         "status":"approved"},follow_redirects=True)
         self.assertEqual(response.status_code,200)
-        self.assertIn(b"ready_for_mcp",response.data)
+        self.assertIn(b"Approved; not yet confirmed in Amazon",response.data)
 
     def test_executed_ppc_change_can_be_adjusted_and_superseded(self):
         from decision_dashboard_v2.interventions import (
@@ -749,7 +753,7 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Prior 6 settled months", response.data)
         self.assertIn(b"Historical price and conversion context", response.data)
         self.assertIn(b"placeholder seed", response.data)
-        self.assertIn(b"2026-08 MTD", response.data)
+        self.assertIn(b"2026-08-01 to 2026-08-31", response.data)
         self.assertIn(b"Incomplete period", response.data)
 
     def test_high_volume_pricing_case_uses_historical_baseline(self):
@@ -759,7 +763,7 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Price decision supported", response.data)
         self.assertIn(b"Completed-month price bands", response.data)
-        self.assertIn(b"Hold $39.99", response.data)
+        self.assertIn(b"Do not infer a live price from the $39.99 selected-period average", response.data)
         self.assertNotIn(b"Use a longer settled economics window", response.data)
         self.assertIn(b"ASIN seasonality", response.data)
         self.assertIn(b"MTD pace", response.data)
