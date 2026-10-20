@@ -92,12 +92,12 @@ def midpoint_arc_elasticity(before_quantity, after_quantity,
     return quantity_change / price_change
 
 
-def price_change_performance(window=7, include_transition=True,
+def price_change_performance(window=7, include_transition=False,
                              baseline_mode="weekday4"):
     """Describe the October 17 Litet price change without claiming causality.
 
-    The default comparison uses completed Pacific days only and weights all four
-    pre-event occurrences of each post-period weekday. A one-to-one date match
+    The default comparison excludes the transition day, uses completed Pacific
+    days only, and weights all four pre-event occurrences of each post-period weekday. A one-to-one date match
     remains available as an explicitly labeled alternative.
     """
     window = window if window in {7, 14, 28} else 7
@@ -366,7 +366,7 @@ def price_change_performance(window=7, include_transition=True,
         elasticity = midpoint_arc_elasticity(
             result_before["packs_per_day"], result_after["packs_per_day"],
             result_before["price_per_pack"], result_after["price_per_pack"],
-        ) if result_before["packs"] and result_after["packs"] else None
+        )
         regular = [row for row in entries if not row["promoted"]]
         old_rows = [row for row in regular if price.get("old") is not None
                     and abs(row["revenue"]/row["packs"]-price["old"]) < .005]

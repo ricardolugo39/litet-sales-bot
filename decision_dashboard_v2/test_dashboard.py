@@ -2,6 +2,8 @@ import unittest
 import os
 import sqlite3
 import tempfile
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from unittest.mock import patch
 
 try:
@@ -17,6 +19,11 @@ class DashboardTest(unittest.TestCase):
         os.unlink(self.log_file.name)
         os.environ["HASTEN_DECISION_DB"] = self.log_file.name
         self.client = app.test_client()
+        if self._testMethodName.startswith("test_price_change_"):
+            clock = patch("decision_dashboard_v2.analytics.datetime", wraps=datetime)
+            mocked_clock = clock.start()
+            mocked_clock.now.return_value = datetime(2026, 10, 19, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
+            self.addCleanup(clock.stop)
 
     def tearDown(self):
         if os.path.exists(self.log_file.name):
@@ -206,6 +213,9 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(amazon_us_date("2026-11-01T08:30:00+00:00"), "2026-11-01")
         self.assertIsNone(midpoint_arc_elasticity(2, 3, 10, 10))
         self.assertIsNone(midpoint_arc_elasticity(0, 0, 10, 12))
+        self.assertIsNone(midpoint_arc_elasticity(2, 0, 10, None))
+        self.assertAlmostEqual(midpoint_arc_elasticity(2, 0, 10, 12), -11)
+        self.assertAlmostEqual(midpoint_arc_elasticity(0, 2, 10, 12), 11)
         self.assertAlmostEqual(midpoint_arc_elasticity(10, 8, 10, 12), -1.2222222222)
 
     def test_price_change_page_uses_completed_matched_days_and_all_asins(self):
@@ -237,6 +247,14 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Include transition day", response.data)
         self.assertIn(b"No price change", response.data)
+        self.assertIn(b"October 17 is included in this view", response.data)
+        self.assertIn(b"Before: 8 matched dates", response.data)
+        self.assertIn(b"2026-09-19", response.data)
+        self.assertIn(b"2026-09-20", response.data)
+        self.assertIn(b"selected observations, not a continuous date range", response.data)
+        self.assertIn(b"No sales; realized price unavailable", response.data)
+        self.assertNotIn(b">Zero demand in one window</span>", response.data)
+        self.assertIn(b"Zero demand in one window alone does not make midpoint elasticity undefined", response.data)
 
     def test_price_change_four_week_weekday_weights_and_two_day_normalization(self):
         from decision_dashboard_v2.analytics import price_change_performance
@@ -268,20 +286,22 @@ class DashboardTest(unittest.TestCase):
         self.assertTrue(any(row["before"]["raw_packs"] == 0
                             for row in two_day["asin_rows"]))
 
-    def test_price_change_default_includes_transition_and_equal_length_alternative(self):
+    def test_price_change_default_excludes_transition_and_equal_length_alternative(self):
         from decision_dashboard_v2.analytics import price_change_performance
 
         default = price_change_performance()
         equal = price_change_performance(7, True, "equal")
-        self.assertTrue(default["include_transition"])
+        self.assertFalse(default["include_transition"])
+        self.assertEqual(default["after_dates"], ["2026-10-18"])
         self.assertEqual(default["baseline_mode"], "weekday4")
         self.assertEqual(equal["before_dates"], ["2026-09-19", "2026-09-20"])
         response = self.client.get("/price-change")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"October 17 is included by default", response.data)
+        self.assertIn(b"October 17 is excluded by default", response.data)
+        self.assertIn(b'<option value="exclude" selected>', response.data)
         self.assertIn(b"Four-week weekday baseline", response.data)
         self.assertIn(b"Six-pack growth objective", response.data)
-        self.assertIn(b"14 packs", response.data)
+        self.assertIn(b"6 packs", response.data)
         self.assertIn(b"Contribution after ads/day", response.data)
         self.assertIn(b"ingestion completeness remains unverified", response.data)
 
