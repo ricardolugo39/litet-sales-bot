@@ -36,7 +36,7 @@ else:  # Supports `python app.py` from this directory.
 
 from decision_dashboard_v2.ppc_evidence import (
     STATE_TABLES, build_workspace, get_evaluation, save_policy,
-    evaluate_candidate, save_evaluation,
+    evaluate_candidate, save_evaluation, decision_card, current_evaluations,
 )
 
 app = Flask(__name__)
@@ -336,6 +336,10 @@ def _evidence_review(page):
     review = build_workspace(database_path(), start, end, brand)
     session.setdefault("evidence_csrf", secrets.token_urlsafe(32))
     evaluation = get_evaluation(brand, request.args.get("evaluation"))
+    saved = current_evaluations(review, brand)
+    for target in review["targets"]:
+        selected = evaluation if evaluation and evaluation["result"]["target_key"] == target["key"] else saved.get(target["key"])
+        target["card"] = decision_card(review, target, selected)
     return render_template("ppc_workspace.html", page=page, brand=brand,
                            start=start, end=end, review=review,
                            csrf_token=session["evidence_csrf"], evaluation=evaluation)

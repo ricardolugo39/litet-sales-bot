@@ -88,3 +88,16 @@ Focused validation:
 ```bash
 python -m unittest decision_dashboard_v2.test_ppc_evidence decision_dashboard_v2.test_interventions
 ```
+
+## Decision cards
+
+PPC and Decisions lead with three priority targets (ranked by selected-period spend),
+with the remaining targets available in a collapsed list. Each card shows observed
+working status, Hold/Increase/Reduce, supported bid amounts, a reason and the next
+attribution-review checkpoint. Missing evidence stays "Not enough evidence / Hold";
+a conditional experiment is never labeled proven success. Only a current matching
+evaluation that passes the existing guardrails can show a numerical proposed change.
+The latest evaluation per exact target persists when returning to the page; stale
+or rejected scenarios cannot keep recommending a change. Reporting detail, model
+settings and scenario inputs remain available under expandable sections. Checkpoint
+dates do not schedule notifications or guarantee report completeness.

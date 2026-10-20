@@ -198,6 +198,28 @@ class EvidenceTests(unittest.TestCase):
     def test_policy_rejects_fractional_lookback(self):
         with self.assertRaises(ValueError):save_policy('Litet',self.settings(prior_lookback_days='28.5'))
 
+    def test_decision_cards_hold_without_evidence_and_show_valid_candidate(self):
+        from .ppc_evidence import decision_card, current_evaluations
+        r=self.review();target=r['targets'][0]
+        card=decision_card(r,target)
+        self.assertEqual((card['result'],card['action'],card['candidate_bid']),('Not enough evidence','Hold',None))
+        self.assertEqual(card['review_date'],'2026-10-21')
+        save_policy('Litet',self.settings());r=self.review();d=self.candidate(r)
+        result=evaluate_candidate(r,d);eid=save_evaluation('Litet',r,d,result)
+        target=next(t for t in r['targets'] if t['key']==result['target_key'])
+        record=current_evaluations(r,'Litet')[target['key']]
+        card=decision_card(r,target,record)
+        self.assertEqual(card['action'],'Reduce')
+        self.assertAlmostEqual(card['change_pct'],1.9/2-1)
+        self.assertIn('proposed test',card['reason'])
+        self.assertEqual(card['result'],'Not enough evidence')  # A forecast is not observed success.
+        response=self.client.get('/ppc?brand=Litet&start=2026-10-01&end=2026-10-19')
+        self.assertIn(b'proposed test',response.data)
+        record['fingerprint']='stale'
+        self.assertEqual(decision_card(r,target,record)['action'],'Hold')
+        old=build_workspace(self.facts,'2026-09-01','2026-09-10','Litet')
+        self.assertTrue(decision_card(old,old['targets'][0])['historical'])
+
     def test_both_tabs_share_evidence_all_brand_and_invalid_dates(self):
         for path in ['/ppc?brand=Litet','/decisions?brand=Litet','/ppc?brand=All','/ppc?brand=Has10']:
             response=self.client.get(path+'&start=2026-10-01&end=2026-10-19')

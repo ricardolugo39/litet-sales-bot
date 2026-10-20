@@ -302,7 +302,7 @@ def build_workspace(path, start, end, brand, today=None):
         expected_days = (date.fromisoformat(mature_end) - date.fromisoformat(start)).days + 1 if mature_end >= start else 0
         signature = {"model": MODEL_VERSION, "brand": brand, "start": start, "end": end, "complete": complete, "policy_id": policy["id"], "source": freshness, "company": company, "recent_company": recent_company, "market": market, "queries": queries, "daily_target_facts": facts, "executed_changes": [{k: i.get(k) for k in ("brand", "campaign_name", "ad_group_name", "entity_name", "match_type", "new_value", "executed_at")} for i in interventions if i.get("executed_at")], "targets": [{"key": t["key"], "selected": t["selected"], "mature": t["mature"], "rate": t["rate"]} for t in targets]}
         fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
-    return {"model_version": MODEL_VERSION, "policy": policy, "fingerprint": fingerprint, "start": start, "end": end, "complete": complete, "mature_end": mature_end, "mature_start": start if expected_days else None, "attribution_cutoff": cutoff, "loaded_mature_days": len(mature_days), "expected_mature_days": expected_days, "totals": totals, "targets": targets, "queries": queries, "company": company, "recent_company": recent_company, "market": market, "recent_start": recent_start, "interventions": interventions, "freshness": freshness, "today": today.isoformat(), "halo_share": totals["other_sku_sales"] / totals["ad_sales"] if totals["ad_sales"] else None}
+    return {"model_version": MODEL_VERSION, "policy": policy, "fingerprint": fingerprint, "start": start, "end": end, "complete": complete, "mature_end": mature_end, "mature_start": start if expected_days else None, "attribution_cutoff": cutoff, "loaded_mature_days": len(mature_days), "expected_mature_days": expected_days, "totals": totals, "targets": targets, "queries": queries, "company": company, "recent_company": recent_company, "market": market, "recent_start": recent_start, "interventions": interventions, "freshness": freshness, "daily_review_dates": sorted({r["report_date"] for r in facts if start <= r["report_date"] <= complete}), "today": today.isoformat(), "halo_share": totals["other_sku_sales"] / totals["ad_sales"] if totals["ad_sales"] else None}
 
 
 def evaluate_candidate(workspace, data):
@@ -394,3 +394,52 @@ def get_evaluation(brand, evaluation_id):
     row["result"] = json.loads(row["result_json"])
     row["payload"] = json.loads(row["payload_json"])
     return row
+
+
+def decision_card(workspace, target, evaluation=None):
+    """Present the supported action without turning a scenario into observed success."""
+    today = date.fromisoformat(workspace["today"])
+    recent = [r for r in workspace.get("daily_review_dates", []) if r > workspace["mature_end"]]
+    next_date = max(today + timedelta(days=1), date.fromisoformat(min(recent)) + timedelta(days=workspace["policy"]["attribution_days"] + 1)) if recent else today + timedelta(days=1)
+    card = {"result": "Not enough evidence", "action": "Hold", "current_bid": None,
+            "candidate_bid": None, "change_pct": None, "review_date": next_date.isoformat(),
+            "reason": "A reliable bid change needs verified current settings, product margins and evidence of how traffic responds.",
+            "review_condition": "Refresh attribution and verify the current bid, product margins and traffic response before changing it.",
+            "historical": workspace["complete"] != (today - timedelta(days=1)).isoformat()}
+    if target["recent"]["clicks"]:
+        share = target.get("recent_click_share")
+        traffic = f"It brings {share:.1%} of recent paid clicks; " if share is not None else "Recent paid traffic is recorded; "
+        card["reason"] = traffic + "recent sales attribution is still developing and a specific bid change is not supported yet."
+    if card["historical"]:
+        card["reason"] = "This is a historical or stale window. Review the latest complete dates before making today's bid decision."
+    if evaluation and evaluation.get("fingerprint") == workspace["fingerprint"] and evaluation.get("model_version") == workspace["model_version"] and evaluation.get("policy_id") == workspace["policy"]["id"] and evaluation["result"]["target_key"] == target["key"]:
+        result = evaluate_candidate(workspace, evaluation["payload"])
+        inputs = result["inputs"]
+        if inputs["settings_date"] == workspace["today"]:
+            card["current_bid"] = inputs["current_bid"]
+        if result["eligible"]:
+            card.update(action="Increase" if inputs["candidate_bid"] > inputs["current_bid"] else "Reduce",
+                        candidate_bid=inputs["candidate_bid"], change_pct=inputs["candidate_bid"] / inputs["current_bid"] - 1,
+                        reason=f"Documented test scenario estimates ${result['mean_gain']:,.2f}/day more company contribution than holding, within your saved guardrails. This is a proposed test, not proven success.",
+                        review_condition="Confirm actual execution, then review refreshed attribution against the documented hypothesis and reversal condition.")
+        else:
+            card["reason"] = "The evaluated change is not supported: " + "; ".join(result["blockers"]) + "."
+    return card
+
+
+def current_evaluations(workspace, brand):
+    """Latest matching evaluation per target; revisiting a tab must retain its evidence."""
+    if not Path(state_path()).exists():
+        return {}
+    with sqlite3.connect(f"file:{state_path()}?mode=ro", uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        if not _table(conn, "ppc_evidence_evaluations"):
+            return {}
+        rows = conn.execute("SELECT * FROM ppc_evidence_evaluations WHERE brand=? AND fingerprint=? AND model_version=? ORDER BY id DESC", (brand, workspace["fingerprint"], MODEL_VERSION)).fetchall()
+    result = {}
+    for row in rows:
+        item = dict(row)
+        item["payload"] = json.loads(item["payload_json"])
+        item["result"] = json.loads(item["result_json"])
+        result.setdefault(item["result"]["target_key"], item)
+    return result
