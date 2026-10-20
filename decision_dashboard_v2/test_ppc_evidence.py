@@ -227,7 +227,7 @@ class EvidenceTests(unittest.TestCase):
         card=decision_card(r,target)
         self.assertEqual(card['action'],'Needs bid data')
         self.assertEqual(card['paid_result'],'Sales below ad spend')
-        self.assertEqual(card['result'],'No on mature direct paid sales')
+        self.assertEqual(card['result'],'Historical paid loss; current result unconfirmed')
         self.assertIn('$27.63',card['reason'])
         self.assertIsNone(card['candidate_bid'])
         target['mature'].update(spend=10,ad_sales=100)

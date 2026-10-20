@@ -418,8 +418,8 @@ def decision_card(workspace, target, evaluation=None):
         if mature["ad_sales"] < mature["spend"]:
             card["paid_result"] = "Sales below ad spend"
             # An accounting observation, not a causal or company-wide verdict.
-            card["result"] = "No on mature direct paid sales"
-            card["reason"] = f"Mature attributed sales of ${mature['ad_sales']:,.2f} did not cover ${mature['spend']:,.2f} of ads, before product costs and fees. Review for reduction; the bid amount is not calculated."
+            card["result"] = "Historical paid loss; current result unconfirmed"
+            card["reason"] = f"Mature attributed sales of ${mature['ad_sales']:,.2f} did not cover ${mature['spend']:,.2f} of ads, before product costs and fees. Investigate this loss; it does not by itself determine today's bid."
             if target["recent"]["spend"] > 0:
                 card["reason"] += f" Recent, incomplete attribution shows ${target['recent']['ad_sales']:,.2f} sales on ${target['recent']['spend']:,.2f} spend; verify whether settings changed before applying the earlier result."
         else:
