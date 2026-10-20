@@ -1,4 +1,5 @@
 import os
+import secrets
 import sqlite3
 import gzip
 import hmac
@@ -6,7 +7,12 @@ import shutil
 import tempfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from flask import Flask, after_this_request, redirect, render_template, request, send_file, url_for
+import sys
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "decision_dashboard_v2"
+from flask import Flask, after_this_request, redirect, render_template, request, send_file, url_for, session, abort
 
 if __package__:
     from .helium_store import save_snapshot
@@ -28,7 +34,14 @@ else:  # Supports `python app.py` from this directory.
                                record_adjustment_proposal, record_pricing_case,
                                update_intervention_status)
 
+from decision_dashboard_v2.ppc_evidence import (
+    STATE_TABLES, build_workspace, get_evaluation, save_policy,
+    evaluate_candidate, save_evaluation,
+)
+
 app = Flask(__name__)
+app.secret_key = os.getenv("DASHBOARD_SESSION_SECRET") or secrets.token_hex(32)
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
 
 
@@ -72,7 +85,7 @@ def _preserve_railway_tables(candidate, current):
         return
     with sqlite3.connect(candidate) as conn:
         conn.execute("ATTACH DATABASE ? AS current_db", (str(current),))
-        for table in ("interventions", "helium_snapshots"):
+        for table in ("interventions", "helium_snapshots", *STATE_TABLES):
             schema = conn.execute(
                 "SELECT sql FROM current_db.sqlite_master WHERE type='table' AND name=?",
                 (table,),
@@ -264,6 +277,14 @@ def common(page):
 def executive():
     ctx=common("executive"); start,end,brand=ctx["start"],ctx["end"],ctx["brand"]; actions,prior=action_queue(start,end,brand)
     ceo_action=executive_actions(start,end,brand,actions)
+    # Do not display retired PPC heuristics beside the evidence-based workspace.
+    ad_words = ("ppc", "bid", "keyword", "acos", "exact", "advertis", "generic traffic")
+    ceo_action["steps"] = [step for step in ceo_action.get("steps", [])
+                           if not step.get("proposal") and not any(word in step.get("action", "").lower() for word in ad_words)]
+    ceo_action["steps"].insert(0, {"action": "Review current advertising evidence",
+                                 "why": "Use attribution-mature results, total contribution and traffic dependence before selecting a documented bid experiment."})
+    ceo_action["headline"] = "Evaluate advertising changes using company contribution, traffic and documented tests."
+    ceo_action["productive_terms"] = []
     selected_metrics=ctx["metrics"]
     pnl_start,pnl_end=start,end
     if not selected_metrics.get("net_sales"):
@@ -289,14 +310,131 @@ def products():
                products=portfolio["products"],market=market_context(brand),seasonality=seasonality_matrix(brand))
     return render_template("dashboard.html",**ctx)
 
+def _evidence_dates(values):
+    try:
+        start = date.fromisoformat(values.get("start", ""))
+        end = date.fromisoformat(values.get("end", ""))
+    except (ValueError, TypeError):
+        raise ValueError("Choose valid reporting dates") from None
+    if start > end:
+        raise ValueError("The start date must not follow the end date")
+    return start.isoformat(), end.isoformat()
+
+
+def _evidence_review(page):
+    brand = request.args.get("brand", "Litet")
+    if brand not in {"Litet", "Has10", "All"}:
+        return "Select a valid brand", 400
+    if request.args.get("start") or request.args.get("end"):
+        try:
+            start, end = _evidence_dates(request.args)
+        except ValueError as exc:
+            return str(exc), 400
+    else:
+        _, start, end, brand = selection()
+    from decision_dashboard_v2.analytics import database_path
+    review = build_workspace(database_path(), start, end, brand)
+    session.setdefault("evidence_csrf", secrets.token_urlsafe(32))
+    evaluation = get_evaluation(brand, request.args.get("evaluation"))
+    return render_template("ppc_workspace.html", page=page, brand=brand,
+                           start=start, end=end, review=review,
+                           csrf_token=session["evidence_csrf"], evaluation=evaluation)
+
+
 @app.get("/ppc")
 def ppc():
-    ctx=common("ppc"); start,end,brand=ctx["start"],ctx["end"],ctx["brand"]
-    playbook=keyword_playbook(start,end,brand)
-    interventions=_interventions_for_brand(recent_interventions(),brand)
-    _mark_interventions_in_workflow(playbook,interventions)
-    ctx.update(ppc_rows=ppc_decisions(start,end,brand),advertising=advertising_detail(start,end,brand),organic_trend=ppc_organic_trend(brand),playbook=playbook,keyword_opportunities=keyword_opportunities(start,end,brand))
-    return render_template("dashboard.html",**ctx)
+    return _evidence_review("ppc")
+
+
+def _evidence_redirect(message=None, evaluation=None, error=False):
+    values = dict(brand=request.form.get("brand", "Litet"),
+                  start=request.form.get("start"), end=request.form.get("end"))
+    if message:
+        values["evidence_error" if error else "evidence_saved"] = message
+    if evaluation:
+        values["evaluation"] = evaluation
+    return redirect(url_for("ppc", **values))
+
+
+def _check_evidence_post():
+    supplied = request.form.get("csrf_token", "")
+    if not supplied or not hmac.compare_digest(supplied, session.get("evidence_csrf", "")):
+        abort(400, "Reload the review page before submitting this form")
+    if request.form.get("brand") not in {"Litet", "Has10"}:
+        raise ValueError("Select one brand")
+    start, end = _evidence_dates(request.form)
+    from decision_dashboard_v2.analytics import database_path
+    return build_workspace(database_path(), start, end, request.form["brand"])
+
+
+@app.post("/ppc/evidence/settings")
+def evidence_settings():
+    try:
+        _check_evidence_post()
+        save_policy(request.form["brand"], request.form)
+    except ValueError as exc:
+        return _evidence_redirect(str(exc), error=True)
+    return _evidence_redirect("A new settings version was saved. Previous evaluations must be rerun.")
+
+
+@app.post("/ppc/evidence/evaluate")
+def evidence_evaluate():
+    try:
+        review = _check_evidence_post()
+        if request.form.get("fingerprint") != review["fingerprint"]:
+            raise ValueError("Data or settings changed. Reload before evaluating")
+        result = evaluate_candidate(review, request.form)
+        evaluation_id = save_evaluation(request.form["brand"], review, request.form, result)
+    except ValueError as exc:
+        return _evidence_redirect(str(exc), error=True)
+    return _evidence_redirect("Evaluation saved; no Amazon settings changed.", evaluation=evaluation_id)
+
+
+@app.post("/ppc/evidence/propose")
+def evidence_propose():
+    try:
+        review = _check_evidence_post()
+        record = get_evaluation(request.form["brand"], request.form.get("evaluation_id"))
+        if not record or record["fingerprint"] != review["fingerprint"] or record["policy_id"] != review["policy"]["id"] or record["model_version"] != review["model_version"]:
+            raise ValueError("The evaluation is missing or stale; re-evaluate current data")
+        result = evaluate_candidate(review, record["payload"])
+        if not result["eligible"]:
+            raise ValueError("Proposal blocked: " + "; ".join(result["blockers"]))
+        target = next(t for t in review["targets"] if t["key"] == result["target_key"])
+        evidence = {"evaluation_id": record["id"], "model_version": review["model_version"], "policy_id": review["policy"]["id"], "fingerprint": review["fingerprint"], "spend": target["mature"]["spend"], "clicks": target["mature"]["clicks"], "orders": target["mature"]["ad_orders"], "ad_sales": target["mature"]["ad_sales"], "acos": target["mature"]["acos"]}
+        record_action_proposal({"brand": target["brand"], "campaign_name": target["campaign_name"], "ad_group_name": target["ad_group_name"], "entity_type": "target", "entity_name": target["target"], "match_type": target["match_type"], "action_type": "evidence_bid_test", "old_value": result["inputs"]["current_bid"], "new_value": result["inputs"]["candidate_bid"], "period_start": review["mature_start"], "period_end": review["mature_end"], "objective": f"Evidence {record['id']} / policy {review['policy']['id']}: " + result["inputs"]["hypothesis"], "baseline": evidence})
+    except ValueError as exc:
+        return _evidence_redirect(str(exc), error=True)
+    return _evidence_redirect("Test proposal recorded for human review. It has not been applied to Amazon.", evaluation=record["id"])
+
+
+@app.post("/ppc/evidence/status/<int:intervention_id>")
+def evidence_status(intervention_id):
+    try:
+        review = _check_evidence_post()
+        row = next((i for i in review["interventions"] if i["audit_id"] == intervention_id), None)
+        if not row:
+            raise ValueError("Decision record not found for this brand")
+        status = request.form.get("status")
+        transitions = {"proposed": {"approved", "dismissed"}, "approved": {"executed", "dismissed"}, "executed": {"monitoring", "completed", "reverted"}, "monitoring": {"completed", "reverted"}}
+        if status not in transitions.get(row["status"], set()):
+            raise ValueError("This status transition is not available")
+        if status == "approved" and row.get("action_type") != "evidence_bid_test":
+            raise ValueError("Legacy proposals require a fresh evidence evaluation before approval")
+        if status == "approved" and row.get("action_type") == "evidence_bid_test":
+            import json
+            baseline = json.loads(row.get("baseline_json") or "{}")
+            record = get_evaluation(request.form["brand"], baseline.get("evaluation_id"))
+            if not record or record["fingerprint"] != review["fingerprint"] or record["policy_id"] != review["policy"]["id"] or record["model_version"] != review["model_version"]:
+                raise ValueError("Evidence changed since this proposal; create a fresh evaluation before approval")
+            if not evaluate_candidate(review, record["payload"])["eligible"]:
+                raise ValueError("The proposal no longer meets your declared guardrails")
+        if status == "executed" and request.form.get("amazon_confirmed") != "yes":
+            raise ValueError("Confirm the actual Amazon change before recording execution")
+        update_intervention_status(intervention_id, status)
+    except ValueError as exc:
+        return _evidence_redirect(str(exc), error=True)
+    return _evidence_redirect("Decision status recorded. The app did not change Amazon.")
 
 
 @app.get("/events/prime-big-deals-2026")
@@ -321,23 +459,7 @@ def price_change():
 
 @app.get("/decisions")
 def decisions():
-    ctx=common("decisions"); portfolio=product_portfolio(ctx["start"],ctx["end"],ctx["brand"])
-    cases=[row for row in portfolio["products"]
-           if row["is_ppc_hero"] or row["is_ppc_test_candidate"] or row["status"] in {"Act now","Watch"}]
-    cases.sort(key=lambda row: (0 if row["is_ppc_hero"] else 1 if row["is_ppc_test_candidate"] else 2,
-                                row["status_rank"], -(row["ordered_sales"] or 0)))
-    interventions=_interventions_for_brand(recent_interventions(),ctx["brand"])
-    current_interventions, intervention_history, intervention_summary = _intervention_rollup(interventions)
-    playbook=keyword_playbook(ctx["start"],ctx["end"],ctx["brand"])
-    _mark_interventions_in_workflow(playbook,interventions)
-
-    ctx.update(actions=cases[:6],portfolio=portfolio,prior_period=portfolio["prior_period"],
-               interventions=interventions,playbook=playbook,
-               current_interventions=current_interventions,
-               intervention_history=intervention_history,
-               intervention_summary=intervention_summary,
-               change_impact=ppc_change_impact(ctx["brand"],interventions))
-    return render_template("dashboard.html",**ctx)
+    return _evidence_review("decisions")
 
 
 def _mark_interventions_in_workflow(playbook,interventions):
@@ -403,48 +525,27 @@ def approve_pricing():
 
 @app.post("/decisions/proposals")
 def create_proposal():
-    if not request.form.get("actual_bid"):
-        return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}",proposal_error="Enter the current Amazon bid before creating the proposal."))
-    try:
-        old_value=float(request.form["actual_bid"])
-        adjustment_pct=float(request.form["adjustment_pct"])
-        amazon_low=float(request.form["amazon_suggested_low"]) if request.form.get("amazon_suggested_low") else None
-        amazon_high=float(request.form["amazon_suggested_high"]) if request.form.get("amazon_suggested_high") else None
-    except (TypeError,ValueError):
-        return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}",proposal_error="Use numeric values for the current bid and optional Amazon range."))
-    new_value=round(old_value*(1+adjustment_pct),2)
-    if old_value<=0 or new_value<=0:
-        return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}",proposal_error="The current Amazon bid must be greater than zero."))
-    if amazon_low is not None and amazon_high is not None and amazon_low>amazon_high:
-        return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}",proposal_error="Amazon range low cannot be greater than range high."))
-    record_action_proposal({"brand":request.form["brand"],"campaign_name":request.form["campaign_name"],
-      "entity_type":request.form["entity_type"],"entity_name":request.form["entity_name"],
-      "ad_group_name":request.form.get("ad_group_name"),"match_type":request.form.get("match_type"),
-      "action_type":request.form["action_type"],"old_value":old_value,"new_value":new_value,
-      "period_start":request.form["period_start"],"period_end":request.form["period_end"],
-      "objective":request.form["objective"],"baseline":{"spend":float(request.form["spend"]),
-      "clicks":float(request.form["clicks"]),"orders":float(request.form["orders"]),
-      "ad_sales":float(request.form.get("ad_sales") or 0),
-      "acos":float(request.form["acos"]) if request.form.get("acos") else None},
-      "amazon_suggested_low":amazon_low,"amazon_suggested_high":amazon_high})
-    return redirect(url_for("decisions",brand=request.form["brand"],period=f"{request.form['period_start']}|{request.form['period_end']}"))
+    return redirect(url_for("ppc", brand=request.form.get("brand", "Litet"),
+                            evidence_error="Fixed-percentage proposals are retired. Evaluate a documented candidate against holding in the evidence workspace."))
+
 
 @app.post("/decisions/interventions/<int:intervention_id>/status")
 def intervention_status(intervention_id):
+    from decision_dashboard_v2.interventions import connect as decision_connection
+    with decision_connection() as conn:
+        row = conn.execute("SELECT action_type FROM interventions WHERE rowid=?", [intervention_id]).fetchone()
+    if row and row["action_type"] == "evidence_bid_test":
+        return redirect(url_for("ppc", brand=request.form.get("brand", "Litet"), evidence_error="Use the evidence-reviewed controls for this proposal."))
+    if request.form.get("status") == "approved":
+        return redirect(url_for("ppc", brand=request.form.get("brand", "Litet"), evidence_error="Legacy proposals require a fresh evidence evaluation before approval."))
     update_intervention_status(intervention_id,request.form["status"])
     return redirect(url_for("decisions",brand=request.form.get("brand","Litet"),period=request.form.get("period","")))
 
 
 @app.post("/decisions/interventions/<int:intervention_id>/adjust")
 def adjust_intervention(intervention_id):
-    brand=request.form.get("brand","Litet"); period=request.form.get("period","")
-    try:
-        new_value=float(request.form.get("new_value", ""))
-        objective=(request.form.get("objective") or "Manual bid adjustment after result review.").strip()
-        record_adjustment_proposal(intervention_id,new_value,objective)
-    except (TypeError,ValueError) as exc:
-        return redirect(url_for("decisions",brand=brand,period=period,proposal_error=str(exc)))
-    return redirect(url_for("decisions",brand=brand,period=period))
+    return redirect(url_for("ppc", brand=request.form.get("brand", "Litet"),
+                            evidence_error="Evaluate a documented replacement candidate in the evidence workspace before proposing a bid adjustment."))
 
 if __name__=="__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5051")), debug=False)

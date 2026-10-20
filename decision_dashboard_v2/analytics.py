@@ -1541,209 +1541,43 @@ def family_diagnostics(period_start, period_end, brand):
 
 
 def ppc_decisions(period_start, period_end, brand):
-    where="1=1" if brand=="All" else "brand=?"; params=[] if brand=="All" else [brand]
+    """Legacy descriptive adapter; percentage-based advice has been retired."""
+    where = "1=1" if brand == "All" else "brand=?"
+    params = [] if brand == "All" else [brand]
     with connect() as conn:
-        rows=conn.execute(f"""SELECT campaign_name,target,match_type,search_term,SUM(impressions) impressions,SUM(clicks) clicks,SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
-          CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos,CASE WHEN SUM(clicks)>0 THEN SUM(spend)/SUM(clicks) END cpc,CASE WHEN SUM(clicks)>0 THEN SUM(ad_orders)/SUM(clicks) END cvr
-          FROM ppc_fact_clean WHERE report_date BETWEEN ? AND ? AND {where} GROUP BY campaign_name,target,match_type,search_term HAVING SUM(spend)>0 ORDER BY SUM(spend) DESC LIMIT 30""",[period_start,period_end,*params]).fetchall()
-    rank_lookup = {k["phrase"].lower(): k for k in _keyword_history(brand)}
-    data=[]
-    for raw in rows:
-        row=dict(raw)
-        keyword = rank_lookup.get((row["search_term"] or "").strip().lower()) or rank_lookup.get((row["target"] or "").strip().lower())
-        rank_change = (keyword["aug_rank"] - keyword["jul_rank"]) if keyword and keyword["jul_rank"] and keyword["aug_rank"] else None
-        if row["orders"]==0 and row["clicks"]>=8: action,confidence,reason="Review / negative","High","Enough clicks without an attributed order; confirm query relevance before negating."
-        elif row["acos"] is not None and row["acos"]>.55 and keyword and keyword["aug_rank"]<=10 and (rank_change is None or rank_change<=1): action,confidence,reason="Reduce cautiously","Medium","Organic rank is already strong and stable; lower in small steps while monitoring total sales."
-        elif row["acos"] is not None and row["acos"]>.55 and keyword and rank_change and rank_change>5: action,confidence,reason="Defend / restructure","High","Organic rank deteriorated while demand remained material; isolate converting queries instead of cutting broadly."
-        elif row["acos"] is not None and row["acos"]<=.30 and row["orders"]>=2: action,confidence,reason="Protect","Medium","Paid conversion is efficient; maintain while monitoring organic rank and total sales."
-        elif row["acos"] is not None and row["acos"]>.55: action,confidence,reason="Hold for evidence","Low","No exact Helium 10 rank match exists for this term, so a bid reduction is not yet supported."
-        else: action,confidence,reason="Monitor","Low","Insufficient evidence for a bid change."
-        organic_signal = (f"Organic #{keyword['aug_rank']} ({rank_change:+d} vs Jul)" if keyword and rank_change is not None
-                          else (f"Organic #{keyword['aug_rank']}" if keyword and keyword['aug_rank'] else "No exact rank match"))
-        row.update(action=action,confidence=confidence,reason=reason,organic_signal=organic_signal,keyword=keyword); data.append(row)
-    return data
+        rows = conn.execute(f"""SELECT campaign_name,target,match_type,search_term,
+          SUM(impressions) impressions,SUM(clicks) clicks,SUM(spend) spend,
+          SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
+          SUM(spend)/NULLIF(SUM(ad_sales),0) acos,
+          SUM(spend)/NULLIF(SUM(clicks),0) cpc
+          FROM ppc_fact_clean WHERE report_date BETWEEN ? AND ? AND {where}
+          GROUP BY campaign_name,target,match_type,search_term ORDER BY SUM(spend) DESC""",
+          [period_start,period_end,*params]).fetchall()
+    return [{**dict(r), "action": "Review evidence", "confidence": "Not rated",
+             "reason": "Use the shared evidence workspace; no fixed bid instruction",
+             "organic_signal": "See dated market evidence"} for r in rows]
 
 
 def keyword_playbook(period_start, period_end, brand):
-    """Convert PPC facts into a repeatable, campaign-addressable operating plan."""
-    if brand not in {"Has10","Litet"}:
-        return None
-    cost=cost_diagnosis(period_start,period_end,brand)
-    contribution_per_order=(cost["pre_ad_contribution"]/cost["net_units"]
-                            if cost["net_units"] else 0)
-    target_profit_per_order=(cost["net_sales"]/cost["net_units"]*.05
-                             if cost["net_units"] else 0)
-    allowable_ad_per_order=max(contribution_per_order-target_profit_per_order,0)
-    with connect() as conn:
-        rows=conn.execute("""SELECT campaign_name,target,match_type,search_term,
-                 SUM(impressions) impressions,SUM(clicks) clicks,SUM(spend) spend,
-                 SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
-                 CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos,
-                 CASE WHEN SUM(clicks)>0 THEN SUM(spend)/SUM(clicks) END cpc
-          FROM ppc_fact_clean
-          WHERE brand=? AND report_date BETWEEN ? AND ?
-          GROUP BY campaign_name,target,match_type,search_term
-          HAVING SUM(clicks)>0
-          ORDER BY SUM(ad_orders) DESC,SUM(spend) DESC""",
-          (brand,period_start,period_end)).fetchall()
-        target_rows=conn.execute("""SELECT campaign_name,ad_group_name,target,match_type,
-                 SUM(clicks) clicks,SUM(spend) spend,SUM(ad_sales) ad_sales,SUM(ad_orders) orders,
-                 CASE WHEN SUM(ad_sales)>0 THEN SUM(spend)/SUM(ad_sales) END acos
-          FROM ppc_fact_clean
-          WHERE brand=? AND report_date BETWEEN ? AND ?
-          GROUP BY campaign_name,ad_group_name,target,match_type""",
-          (brand,period_start,period_end)).fetchall()
-        history_rows=conn.execute("""SELECT campaign_name,ad_group_name,target,match_type,
-                 substr(report_date,1,7) month,SUM(clicks) clicks,SUM(spend) spend,
-                 SUM(ad_sales) ad_sales,SUM(ad_orders) orders
-          FROM ppc_fact_clean WHERE brand=? AND report_date<=?
-          GROUP BY campaign_name,ad_group_name,target,match_type,substr(report_date,1,7)
-          ORDER BY month DESC""",(brand,period_end)).fetchall()
-        bid_table=conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ppc_bid_change'").fetchone()
-        bid_rows=(conn.execute("""SELECT campaign_name,ad_group_name,target_value,suggested_bid,actual_bid,
-                 amazon_suggested_low,amazon_suggested_high,change_date
-          FROM ppc_bid_change WHERE brand=? ORDER BY change_date DESC,bid_change_id DESC""",(brand,)).fetchall()
-                  if bid_table else [])
-        freshness=conn.execute("""SELECT MIN(report_date) first_loaded_date,MAX(report_date) last_loaded_date,
-                 COUNT(DISTINCT report_date) loaded_days
-          FROM ppc_fact_clean WHERE brand=?""",(brand,)).fetchone()
-    target_lookup={(r["campaign_name"],r["target"],r["match_type"]):dict(r) for r in target_rows}
-    history_lookup={}
-    for raw in history_rows:
-        row=dict(raw); key=(row["campaign_name"],row["ad_group_name"],row["target"],row["match_type"])
-        row["acos"]=row["spend"]/row["ad_sales"] if row["ad_sales"] else None
-        row["cpc"]=row["spend"]/row["clicks"] if row["clicks"] else None
-        history_lookup.setdefault(key,[]).append(row)
-    bid_lookup={}
-    for raw in bid_rows:
-        row=dict(raw); key=(row["campaign_name"] or "",row["ad_group_name"] or "",row["target_value"] or "")
-        bid_lookup.setdefault(key,row)
-    rank_lookup={k["phrase"].lower():k for k in _keyword_history(brand)}
-    target_plan=[]
-    for raw in target_rows:
-        target=dict(raw)
-        target["cpc"]=target["spend"]/target["clicks"] if target["clicks"] else None
-        target["cvr"]=min(target["orders"]/target["clicks"],1) if target["clicks"] else None
-        target["modeled_max_cpc"]=(allowable_ad_per_order*target["cvr"]
-                                   if target["clicks"]>=5 and target["cvr"] is not None else None)
-        target["history"]=history_lookup.get((target["campaign_name"],target["ad_group_name"],target["target"],target["match_type"]),[])[:6]
-        saved=bid_lookup.get((target["campaign_name"],target["ad_group_name"],target["target"])) or bid_lookup.get((target["campaign_name"],"",target["target"]))
-        target["amazon_suggested_low"]=saved.get("amazon_suggested_low") if saved else None
-        target["amazon_suggested_high"]=saved.get("amazon_suggested_high") if saved else None
-        rank=rank_lookup.get((target["target"] or "").strip().lower())
-        if rank:
-            change=(rank["aug_rank"]-rank["jul_rank"] if rank.get("aug_rank") and rank.get("jul_rank") else None)
-            target["organic_evidence"]=(f"Organic #{rank['aug_rank']} ({change:+d} vs Jul)" if change is not None
-                                         else f"Organic #{rank['aug_rank']}" if rank.get("aug_rank") else "Not ranked")
-        else:
-            target["organic_evidence"]="No exact H10 rank match" if brand=="Litet" else "H10 keyword history not captured"
-        strong_organic=bool(rank and rank.get("aug_rank") and rank["aug_rank"]<=10)
-        if target["clicks"]>=8 and target["orders"]==0:
-            target["decision"]="Reduce bid 30%"; target["reason"]="Enough target-level clicks without an attributed order."
-        elif target["acos"] is not None and target["acos"]>1:
-            target["decision"]="Reduce bid 30%"; target["reason"]="Target-level spend exceeds attributed sales."
-        elif target["acos"] is not None and target["acos"]>.75:
-            cut=15 if strong_organic else 20
-            target["decision"]=f"Reduce bid {cut}%"; target["reason"]="Target-level ACoS is above the sustainable range; use a measured cut where organic rank is valuable."
-        elif target["acos"] is not None and target["acos"]>.50:
-            target["decision"]="Reduce bid 10%"; target["reason"]="The target converts, but the full target total is above the desired economics."
-        elif (target["acos"] is not None and target["acos"]<=.30 and
-              target["orders"]>=3 and target["clicks"]>=12 and
-              target["modeled_max_cpc"] is not None and
-              target["modeled_max_cpc"]>=target["cpc"]*1.15 and not strong_organic):
-            target["decision"]="Increase bid 10%"
-            target["reason"]="Conversion is efficient with sufficient volume, and modeled CPC headroom is at least 15%; increase cautiously and review after 7 days."
-        elif target["acos"] is not None and target["acos"]<=.30 and target["orders"]>=2:
-            target["decision"]="Hold bid"; target["reason"]="Conversion is efficient, but the evidence or strategic need does not support paying more yet."
-        else:
-            target["decision"]="Monitor"; target["reason"]="No target-level bid change is supported yet."
-        target["confidence"]=("High" if target["clicks"]>=20 and target["orders"]>=5
-                              else "Medium" if target["clicks"]>=8 else "Low")
-        target["is_actionable"]=target["decision"].startswith(("Reduce","Increase"))
-        if target["decision"].startswith("Reduce"):
-            pct=float(target["decision"].split()[-1].rstrip("%"))/100
-            target["adjustment_pct"]=-pct
-            target["proposed_bid"]=None
-            target["action_type"]="reduce_bid"
-        elif target["decision"].startswith("Increase"):
-            target["adjustment_pct"]=.10
-            target["proposed_bid"]=None
-            target["action_type"]="increase_bid_test"
-        else:
-            target["adjustment_pct"]=None; target["proposed_bid"]=None; target["action_type"]="protect" if target["decision"]=="Hold bid" else "monitor"
-        target_plan.append(target)
-    target_plan.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["target"].lower()))
-    campaign_map={}
-    for target in target_plan:
-        campaign=campaign_map.setdefault(target["campaign_name"],{
-            "campaign_name":target["campaign_name"],"targets":[],"spend":0,
-            "orders":0,"ad_sales":0,"action_count":0})
-        campaign["targets"].append(target)
-        campaign["spend"]+=target["spend"] or 0
-        campaign["orders"]+=target["orders"] or 0
-        campaign["ad_sales"]+=target["ad_sales"] or 0
-        if target["decision"].startswith(("Reduce","Increase")):
-            campaign["action_count"]+=1
-    campaign_groups=[]
-    for campaign in campaign_map.values():
-        campaign["acos"]=(campaign["spend"]/campaign["ad_sales"]
-                           if campaign["ad_sales"] else None)
-        campaign["open"]=campaign["action_count"]>0
-        campaign["recommendation"]=(f"{campaign['action_count']} bid change{'s' if campaign['action_count']!=1 else ''}"
-                                      if campaign["action_count"] else "No immediate bid changes")
-        campaign_groups.append(campaign)
-    campaign_groups.sort(key=lambda r:(not r["open"],-r["spend"],r["campaign_name"].lower()))
-    focus=[]; reduce=[]; watch=[]
-    for raw in rows:
-        row=dict(raw)
-        row["target_total"]=target_lookup.get((row["campaign_name"],row["target"],row["match_type"]),{})
-        # Amazon attribution can place more orders than same-period clicks. Cap the
-        # observed rate for planning and suppress bid guidance on tiny samples.
-        observed_cvr=min(row["orders"]/row["clicks"],1) if row["clicks"] else 0
-        row["modeled_max_cpc"]=allowable_ad_per_order*observed_cvr if row["clicks"]>=5 else None
-        row["location"]=f"{row['campaign_name']} → {row['target']} ({row['match_type']})"
-        rank=rank_lookup.get((row["search_term"] or "").strip().lower()) or rank_lookup.get((row["target"] or "").strip().lower())
-        if rank:
-            change=(rank["aug_rank"]-rank["jul_rank"] if rank.get("aug_rank") and rank.get("jul_rank") else None)
-            row["organic_evidence"]=(f"Organic #{rank['aug_rank']} ({change:+d} vs Jul)" if change is not None
-                                     else f"Organic #{rank['aug_rank']}" if rank.get("aug_rank") else "Not ranked")
-        else:
-            row["organic_evidence"]="No exact H10 rank match" if brand=="Litet" else "H10 keyword history not captured"
-        discovered=(row["search_term"] or "").strip().lower() != (row["target"] or "").strip().lower()
-        if row["clicks"] < 5 or row["orders"] > row["clicks"]:
-            row["decision"]="Watch attribution"
-            row["instruction"]="The sample is too small—or attributed orders exceed same-period clicks—so do not create a dedicated target yet."
-            watch.append(row)
-        elif row["orders"]>=2 and row["acos"] is not None and row["acos"]<=.30:
-            row["decision"]="Harvest into EXACT" if discovered or row["match_type"]!="EXACT" else "Protect"
-            row["instruction"]=("Create this customer search term as EXACT in the matching color campaign; keep the source active at a controlled bid."
-                                if row["decision"]=="Harvest into EXACT" else "Hold the exact target and monitor total sales, not ACoS alone.")
-            focus.append(row)
-        elif row["orders"]>=2 and row["acos"] is not None and row["acos"]<=.50:
-            row["decision"]="Keep, lower CPC"
-            row["instruction"]="Keep because it converts, but move it to EXACT and lower the source bid 10–15% until CPC approaches the modeled ceiling."
-            focus.append(row)
-        elif row["clicks"]>=8 and (row["orders"]==0 or row["acos"] is None or row["acos"]>.65):
-            row["decision"]="Reduce source bid"
-            cut="30%" if row["orders"]==0 or (row["acos"] or 0)>1 else "20%"
-            row["instruction"]=f"Reduce this target in this campaign by {cut}; do not negate the customer term if it converts elsewhere."
-            reduce.append(row)
-        else:
-            row["decision"]="Watch"
-            row["instruction"]="Not enough reliable evidence for a dedicated target or negative yet."
-            watch.append(row)
-    focus.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["search_term"].lower()))
-    reduce.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["search_term"].lower()))
-    watch.sort(key=lambda r:(r["campaign_name"].lower(),-r["spend"],r["search_term"].lower()))
-    objective=(f"Preserve the Has10 listing through the season while moving TaCoS toward {cost['break_even_tacos']:.0%} or lower."
-               if brand=="Has10" else
-               f"Protect Litet's proven traffic while moving TaCoS toward {cost['break_even_tacos']:.0%} or lower and checking organic rank before every material cut.")
-    return {"targets":target_plan,"campaigns":campaign_groups,"focus":focus[:15],"reduce":reduce[:12],"watch":watch[:12],
-            "contribution_per_order":contribution_per_order,
-            "allowable_ad_per_order":allowable_ad_per_order,
-            "objective":objective,
-            "freshness":dict(freshness),"selected_start":period_start,"selected_end":period_end,
-            "method":"Customer search terms show what shoppers typed. Campaign, target, and match type show exactly where the traffic was purchased."}
+    """Compatibility adapter: all numerical advice comes from documented tests."""
+    if brand not in {"Litet", "Has10"}: return None
+    from .ppc_evidence import build_workspace
+    review = build_workspace(database_path(), period_start, period_end, brand)
+    targets = []
+    for row in review["targets"]:
+        targets.append({**row, **row["selected"], "orders": row["selected"]["ad_orders"],
+                        "decision": row["guidance"], "confidence": "Not rated",
+                        "is_actionable": False, "action_type": "evidence_review",
+                        "adjustment_pct": None, "proposed_bid": None})
+    targets.sort(key=lambda r:(r["campaign_name"].lower(),r["key"]))
+    groups = {}
+    for row in targets:
+        groups.setdefault(row["campaign_name"], {"campaign_name":row["campaign_name"], "targets":[], "open":True})["targets"].append(row)
+    return {"targets":targets, "campaigns":list(groups.values()), "focus":[], "reduce":[],
+            "watch":[], "contribution_per_order":None, "allowable_ad_per_order":None,
+            "objective":"Evaluate company contribution and visibility with documented evidence",
+            "freshness":review["freshness"], "selected_start":period_start,
+            "selected_end":period_end, "method":"Shared evidence workspace"}
 
 
 def ppc_organic_trend(brand):

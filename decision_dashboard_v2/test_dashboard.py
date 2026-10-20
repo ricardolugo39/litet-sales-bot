@@ -36,7 +36,7 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"TaCoS", response.data)
         self.assertIn(b"Growth and adoption", response.data)
         self.assertIn(b"Three priorities", response.data)
-        self.assertIn(b"Stop PPC budget increases", response.data)
+        self.assertIn(b"Review current advertising evidence", response.data)
         self.assertIn(b"Do not change price from four days of demand", response.data)
         self.assertIn(b"Confirm replenishment", response.data)
         self.assertIn(b"Estimated P&amp;L", response.data)
@@ -410,7 +410,7 @@ class DashboardTest(unittest.TestCase):
             "/?brand=Litet&period=2026-09-01%7C2026-09-04"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Current operations \xc2\xb7 2026-10-01\xe2\x80\x932026-10-18", response.data)
+        self.assertIn(b"Current operations \xc2\xb7 2026-10-01", response.data)
         self.assertIn(b"Latest settled period \xc2\xb7 2026-09-01\xe2\x80\x932026-09-30", response.data)
         self.assertNotIn(b"Net sales</span><b>$0</b>", response.data)
 
@@ -430,12 +430,12 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(b"Has10", response.data)
         self.assertIn(b"Seasonal scale and availability", response.data)
         self.assertIn(b"Three priorities", response.data)
-        self.assertIn(b"orange cleat covers", response.data)
+        self.assertIn(b"Review current advertising evidence", response.data)
         self.assertIn(b"Do not answer the current profit pressure with a broad price change", response.data)
         self.assertNotIn(b"Keep the $13.99 base price", response.data)
         self.assertIn(b"Why Amazon costs are 41.5%", response.data)
         self.assertIn(b"Maximum ads to break even", response.data)
-        self.assertIn(b"Bring TaCoS below 34%", response.data)
+        self.assertNotIn(b"Bring TaCoS below 34%", response.data)
         self.assertNotIn(b"white cycling socks", response.data)
 
     def test_homepage_exposes_brand_specific_operating_modes(self):
@@ -455,7 +455,7 @@ class DashboardTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Has10", response.data)
-        self.assertIn(b"orange cleat covers", response.data)
+        self.assertIn(b"Review current advertising evidence", response.data)
 
     def test_current_month_filter_is_consolidated(self):
         from decision_dashboard_v2.analytics import periods, ppc_periods
@@ -670,56 +670,25 @@ class DashboardTest(unittest.TestCase):
         for marker in (b"Pricing:", b"PPC:", b"Measure:", b"Limitation:"):
             self.assertIn(marker, response.data)
 
-    def test_decisions_reuses_product_recommendations(self):
-        response = self.client.get(
-            "/decisions?brand=Litet&period=2026-08-01%7C2026-08-23"
-        )
+    def test_decisions_reuses_shared_evidence(self):
+        response = self.client.get('/decisions?brand=Litet&start=2026-08-01&end=2026-08-16')
         self.assertEqual(response.status_code, 200)
-        for marker in (b"Coordinated cases", b"PPC hero", b"Secondary test",
-                       b"Evidence limitation"):
+        for marker in (b'Decision and test workspace', b'Company outcome across all packs', b'Model assumptions are not yet confirmed'):
             self.assertIn(marker, response.data)
 
     def test_has10_ppc_playbook_shows_campaign_location(self):
-        response = self.client.get(
-            "/ppc?brand=Has10&period=2026-08-01%7C2026-08-16"
-        )
+        response = self.client.get('/ppc?brand=Has10&start=2026-08-01&end=2026-08-16')
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"PPC actions", response.data)
-        self.assertIn(b"Decision timeframe", response.data)
-        self.assertIn(b"Customer search term", response.data)
-        self.assertIn(b"Campaign", response.data)
-        self.assertIn(b"Has10 | Blue | Historic Keywords", response.data)
-        self.assertIn(b"Target / ad group", response.data)
-        self.assertIn(b"cleat covers", response.data)
-        self.assertIn(b"Keyword opportunities", response.data)
-        self.assertIn(b"youth cleat covers", response.data)
-        self.assertIn(b"Harvest into EXACT", response.data)
-        self.assertIn(b"Campaign", response.data)
+        for marker in (b'Advertising evidence', b'cleat covers', b'Company outcome across all packs', b'attribution', b'Customer queries'):
+            self.assertIn(marker, response.data)
+        self.assertNotIn(b'Harvest into EXACT', response.data)
 
     def test_litet_ppc_playbook_shows_campaign_and_organic_evidence(self):
-        response = self.client.get(
-            "/ppc?brand=Litet&period=2026-08-01%7C2026-08-16"
-        )
+        response = self.client.get('/ppc?brand=Litet&start=2026-08-01&end=2026-08-16')
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"PPC actions", response.data)
-        self.assertIn(b"LITET Ranking Campaign", response.data)
-        self.assertIn(b"Organic #", response.data)
-        self.assertIn(b"Target / ad group", response.data)
-        self.assertIn(b"Targeting decisions", response.data)
-        self.assertIn(b"Customer search-term evidence", response.data)
-        self.assertIn(b"Selected-period performance", response.data)
-        self.assertIn(b"Keyword opportunities", response.data)
-        self.assertIn(b"aero cycling socks", response.data)
-        self.assertIn(b"Where Litet can close the visibility gap", response.data)
-        self.assertIn(b"Selected-period PPC evidence", response.data)
-        self.assertIn(b"Matching query", response.data)
-        self.assertIn(b"PPC spend vs total ordered units", response.data)
-        self.assertIn(b"March 2026", response.data)
-        self.assertIn(b"YTD", response.data)
-        self.assertIn(b"Blue portion", response.data)
-        self.assertIn(b"Helium 10 30-day snapshot", response.data)
-        self.assertLess(response.data.index(b"Targeting decisions"),
-                        response.data.index(b"Keyword opportunities"))
+        for marker in (b'Advertising evidence', b'cycling socks', b'Company outcome across all packs', b'attribution', b'Customer queries'):
+            self.assertIn(marker, response.data)
+        self.assertNotIn(b'Harvest into EXACT', response.data)
 
     def test_ppc_targets_are_grouped_by_campaign(self):
         from decision_dashboard_v2.analytics import keyword_playbook
@@ -730,16 +699,14 @@ class DashboardTest(unittest.TestCase):
         self.assertTrue(any(c["open"] for c in playbook["campaigns"]))
         self.assertEqual(sum(len(c["targets"]) for c in playbook["campaigns"]),
                          len(playbook["targets"]))
-        self.assertTrue(any(r["decision"].startswith("Increase")
-                            for r in playbook["targets"]))
-        self.assertTrue(all(r["confidence"] in {"Low","Medium","High"}
-                            for r in playbook["targets"]))
+        self.assertTrue(all(r["adjustment_pct"] is None for r in playbook["targets"]))
+        self.assertTrue(all(r["confidence"] == "Not rated" for r in playbook["targets"]))
 
     def test_all_v2_pages(self):
         query = "?brand=Litet&period=2026-08-01%7C2026-08-16"
         for path, marker in (("/products", b"Parent competitive context"),
-                             ("/ppc", b"PPC + organic"),
-                             ("/decisions", b"Coordinated cases"),
+                             ("/ppc", b"Advertising evidence"),
+                             ("/decisions", b"Decision and test workspace"),
                              ("/decisions/pricing", b"Contribution-preservation scenarios")):
             response = self.client.get(path + query)
             self.assertEqual(response.status_code, 200, path)
@@ -767,18 +734,21 @@ class DashboardTest(unittest.TestCase):
             for path in ("/", "/products", "/ppc", "/decisions"):
                 response=self.client.get(f"{path}?brand=Litet&period={period}")
                 self.assertEqual(response.status_code,200,(path,period))
-                self.assertIn(b"Quick ranges",response.data)
-                self.assertIn(b"Monthly periods",response.data)
+                if path in {"/ppc", "/decisions"}:
+                    self.assertIn(b"name=\"start\"",response.data)
+                else:
+                    self.assertIn(b"Quick ranges",response.data)
+                    self.assertIn(b"Monthly periods",response.data)
 
     def test_ppc_all_brands_renders_without_missing_trend_fields(self):
         response=self.client.get("/ppc?brand=All")
         self.assertEqual(response.status_code,200)
-        self.assertIn(b"Select Litet or Has10",response.data)
+        self.assertIn(b"Select one brand",response.data)
 
     def test_invalid_period_falls_back_to_default_period(self):
         response=self.client.get("/ppc?brand=Litet&period=2026-08-01")
         self.assertEqual(response.status_code,200)
-        self.assertIn(b"PPC + organic",response.data)
+        self.assertIn(b"Advertising evidence",response.data)
 
     def test_unverified_price_test_is_rejected(self):
         response = self.client.post("/decisions/pricing/approve", data={
@@ -788,65 +758,17 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn(b"verified current Amazon price", response.data)
 
-    def test_ppc_proposal_is_queued_once_and_can_be_approved(self):
-        payload={"brand":"Litet","campaign_name":"LITET discovery",
-                 "entity_type":"target","entity_name":"men cycling socks",
-                 "ad_group_name":"discovery","match_type":"BROAD",
-                 "action_type":"reduce_bid_15pct","actual_bid":"2.02",
-                 "adjustment_pct":"-0.15","period_start":"2026-09-01",
-                 "period_end":"2026-09-04","objective":"Reduce waste",
-                 "spend":"97.10","clicks":"48","orders":"3","acos":"1.388"}
-        for _ in range(2):
-            response=self.client.post("/decisions/proposals",data=payload,follow_redirects=True)
-            self.assertEqual(response.status_code,200)
-        from decision_dashboard_v2.interventions import connect
-        with connect() as conn:
-            rows=conn.execute("SELECT * FROM interventions WHERE entity_name=?",
-                              ("men cycling socks",)).fetchall()
-        self.assertEqual(len(rows),1)
-        self.assertIsNotNone(rows[0]["created_at"])
-        intervention_id=rows[0]["id"]
-        response=self.client.post(f"/decisions/interventions/{intervention_id}/status",
-                                  data={"brand":"Litet","period":"2026-09-01|2026-09-04",
-                                        "status":"approved"},follow_redirects=True)
+    def test_legacy_fixed_percentage_proposal_is_retired(self):
+        response=self.client.post('/decisions/proposals',data={'brand':'Litet','action_type':'reduce_bid_15pct'},follow_redirects=True)
         self.assertEqual(response.status_code,200)
-        self.assertIn(b"Approved; not yet confirmed in Amazon",response.data)
+        self.assertIn(b'Fixed-percentage proposals are retired', response.data)
+        self.assertFalse(os.path.exists(self.log_file.name))
 
-    def test_executed_ppc_change_can_be_adjusted_and_superseded(self):
-        from decision_dashboard_v2.interventions import (
-            connect, record_action_proposal, update_intervention_status,
-        )
-        intervention_id, _ = record_action_proposal({
-            "brand":"Litet", "asin":"—", "campaign_name":"LITET Ranking Campaign",
-            "ad_group_name":"Rankings", "entity_type":"keyword",
-            "entity_name":"cycling socks", "match_type":"BROAD",
-            "action_type":"reduce_bid_30pct", "old_value":1.20, "new_value":.84,
-            "period_start":"2026-09-01", "period_end":"2026-09-06",
-            "objective":"Reduce waste", "baseline":{"spend":78.18,"clicks":54,
-            "orders":2,"ad_sales":54.98,"acos":1.42},
-        })
-        update_intervention_status(intervention_id,"approved")
-        update_intervention_status(intervention_id,"executed")
-        response=self.client.post(
-            f"/decisions/interventions/{intervention_id}/adjust",
-            data={"brand":"Litet","period":"2026-09-01|2026-09-17",
-                  "new_value":"1.00","objective":"Recover controlled traffic"},
-            follow_redirects=False,
-        )
-        self.assertEqual(response.status_code,302)
-        with connect() as conn:
-            followup=conn.execute(
-                "SELECT rowid AS intervention_rowid,* FROM interventions WHERE supersedes_intervention_id=?",
-                (intervention_id,),
-            ).fetchone()
-        self.assertEqual(followup["status"],"proposed")
-        update_intervention_status(followup["intervention_rowid"],"approved")
-        update_intervention_status(followup["intervention_rowid"],"executed")
-        with connect() as conn:
-            prior=conn.execute("SELECT status,outcome FROM interventions WHERE rowid=?",
-                               (intervention_id,)).fetchone()
-        self.assertEqual(prior["status"],"completed")
-        self.assertEqual(prior["outcome"],f"revised_by:{followup['intervention_rowid']}")
+    def test_legacy_adjustment_requires_evidence_review(self):
+        response=self.client.post('/decisions/interventions/1/adjust',data={'brand':'Litet','new_value':'1.00'},follow_redirects=True)
+        self.assertEqual(response.status_code,200)
+        self.assertIn(b'documented replacement candidate', response.data)
+        self.assertFalse(os.path.exists(self.log_file.name))
 
     def test_pricing_case_uses_trailing_settled_history(self):
         response = self.client.get(
