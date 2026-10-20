@@ -94,10 +94,18 @@ python -m unittest decision_dashboard_v2.test_ppc_evidence decision_dashboard_v2
 PPC and Decisions lead with three priority targets (ranked by selected-period spend),
 with the remaining targets available in a collapsed list. Each card shows observed
 working status, Hold/Increase/Reduce, supported bid amounts, a reason and the next
-attribution-review checkpoint. Missing evidence stays "Not enough evidence / Hold";
+attribution-review checkpoint. Missing bid evidence is labeled "Needs bid data / Not calculated", never an automatic Hold;
 a conditional experiment is never labeled proven success. Only a current matching
 evaluation that passes the existing guardrails can show a numerical proposed change.
 The latest evaluation per exact target persists when returning to the page; stale
 or rejected scenarios cannot keep recommending a change. Reporting detail, model
 settings and scenario inputs remain available under expandable sections. Checkpoint
 dates do not schedule notifications or guarantee report completeness.
+
+Cards separately report mature direct paid accounting: when attributed revenue is
+below ad spend, it cannot cover the ads even before product costs. This historical
+observation is not a statistical forecast, a causal bid verdict or an estimate of
+company-wide incremental contribution. Recent results remain separately labeled,
+and matching purchased-product costs are required before calling revenue above
+ad spend profitable. Hold is reserved for an evaluated candidate rejected with
+a currently verified bid; no candidate or missing bid data is not evidence for Hold.

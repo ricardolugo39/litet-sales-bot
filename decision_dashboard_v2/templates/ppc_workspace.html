@@ -10,12 +10,12 @@
 {% if request.args.get('evidence_error') %}<div class="alert" role="alert">{{request.args.get('evidence_error')}}</div>{% endif %}
 {% if request.args.get('evidence_saved') %}<div class="notice" role="status">{{request.args.get('evidence_saved')}}</div>{% endif %}
 <p class="muted">A clear action for each target, based on company contribution and valuable traffic. Bid changes are proposed tests for human review.</p>
-<h2>What to do now</h2>
+<h2>What to do now</h2><p class="small">“Needs bid data” means the app has not calculated a bid action. It does not mean the current bid is correct. “Hold” is reserved for an evaluated change that was rejected.</p>
 {% for target in review.targets %}
 {% if loop.index==4 %}<details class="panel" {% if evaluation %}open{% endif %}><summary>Other targets · {{review.targets|length - 3}}</summary>{% endif %}
 <section class="panel" id="target-{{target.key}}"><h3>{{target.target}} <span class="tag">{{target.match_type}}</span></h3><div class="muted">{{target.brand}} · {{target.campaign_name}} → {{target.ad_group_name}}</div>
-{% set card=target.card %}<div class="facts"><span>Is it working?<b>{{card.result}}</b></span><span>Action<b>{{card.action}}{% if card.candidate_bid is not none %} · proposed test{% endif %}</b></span><span>Bid change<b>{% if card.candidate_bid is not none %}{{card.current_bid|money2}} → {{card.candidate_bid|money2}} ({{'%+.1f'|format(card.change_pct*100)}}%){% else %}No change{% endif %}</b><span class="small">{% if card.current_bid is not none and card.candidate_bid is none %}Current bid {{card.current_bid|money2}}{% elif card.current_bid is none %}Current bid needs verification{% endif %}</span></span><span>Next evidence review<b>{{card.review_date}}</b></span></div>
-<p>{{card.reason}}</p>
+{% set card=target.card %}<div class="facts"><span>Is it working?<b>{{card.result}}</b></span><span>Action<b>{{card.action}}{% if card.candidate_bid is not none %} · proposed test{% endif %}</b></span><span>Bid change<b>{% if card.candidate_bid is not none %}{{card.current_bid|money2}} → {{card.candidate_bid|money2}} ({{'%+.1f'|format(card.change_pct*100)}}%){% elif card.action=='Hold' %}No supported change{% else %}Not calculated{% endif %}</b><span class="small">{% if card.current_bid is not none and card.candidate_bid is none %}Current bid {{card.current_bid|money2}}{% elif card.current_bid is none %}Current bid needs verification{% endif %}</span></span><span>Next evidence review<b>{{card.review_date}}</b></span></div>
+<p>{{card.reason}}</p><p class="small">Mature paid result · {{review.mature_start or '—'}}–{{review.mature_end}}: {{card.paid_result}}. This excludes unmeasured effects on other sales.</p>
 <details><summary>Why this recommendation?</summary>
 <p class="small">{{card.review_condition}} The review date is an evidence checkpoint, not an automatic reminder.{% if card.historical %} This selected window cannot support today's bid action.{% endif %}</p>
 <p class="reason"><b>{{target.guidance}}</b></p>

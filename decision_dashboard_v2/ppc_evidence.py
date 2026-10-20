@@ -401,7 +401,7 @@ def decision_card(workspace, target, evaluation=None):
     today = date.fromisoformat(workspace["today"])
     recent = [r for r in workspace.get("daily_review_dates", []) if r > workspace["mature_end"]]
     next_date = max(today + timedelta(days=1), date.fromisoformat(min(recent)) + timedelta(days=workspace["policy"]["attribution_days"] + 1)) if recent else today + timedelta(days=1)
-    card = {"result": "Not enough evidence", "action": "Hold", "current_bid": None,
+    card = {"result": "Not enough evidence", "action": "Needs bid data", "current_bid": None,
             "candidate_bid": None, "change_pct": None, "review_date": next_date.isoformat(),
             "reason": "A reliable bid change needs verified current settings, product margins and evidence of how traffic responds.",
             "review_condition": "Refresh attribution and verify the current bid, product margins and traffic response before changing it.",
@@ -410,6 +410,22 @@ def decision_card(workspace, target, evaluation=None):
         share = target.get("recent_click_share")
         traffic = f"It brings {share:.1%} of recent paid clicks; " if share is not None else "Recent paid traffic is recorded; "
         card["reason"] = traffic + "recent sales attribution is still developing and a specific bid change is not supported yet."
+    mature = target["mature"]
+    card["paid_result"] = "No mature spend"
+    card["paid_shortfall"] = None
+    if mature["spend"] > 0:
+        card["paid_shortfall"] = mature["spend"] - mature["ad_sales"]
+        if mature["ad_sales"] < mature["spend"]:
+            card["paid_result"] = "Sales below ad spend"
+            # An accounting observation, not a causal or company-wide verdict.
+            card["result"] = "No on mature direct paid sales"
+            card["reason"] = f"Mature attributed sales of ${mature['ad_sales']:,.2f} did not cover ${mature['spend']:,.2f} of ads, before product costs and fees. Review for reduction; the bid amount is not calculated."
+            if target["recent"]["spend"] > 0:
+                card["reason"] += f" Recent, incomplete attribution shows ${target['recent']['ad_sales']:,.2f} sales on ${target['recent']['spend']:,.2f} spend; verify whether settings changed before applying the earlier result."
+        else:
+            card["paid_result"] = "Sales cover ads; product costs still matter"
+            card["reason"] = f"Mature attributed sales of ${mature['ad_sales']:,.2f} exceed ${mature['spend']:,.2f} of ad spend. Purchased-product costs and fees must be matched before calling this profitable or choosing an increase."
+    card["review_condition"] += " A later date alone will not supply missing bid settings or purchased-product evidence."
     if card["historical"]:
         card["reason"] = "This is a historical or stale window. Review the latest complete dates before making today's bid decision."
     if evaluation and evaluation.get("fingerprint") == workspace["fingerprint"] and evaluation.get("model_version") == workspace["model_version"] and evaluation.get("policy_id") == workspace["policy"]["id"] and evaluation["result"]["target_key"] == target["key"]:
@@ -423,6 +439,7 @@ def decision_card(workspace, target, evaluation=None):
                         reason=f"Documented test scenario estimates ${result['mean_gain']:,.2f}/day more company contribution than holding, within your saved guardrails. This is a proposed test, not proven success.",
                         review_condition="Confirm actual execution, then review refreshed attribution against the documented hypothesis and reversal condition.")
         else:
+            card["action"] = "Hold" if card["current_bid"] is not None else "Needs bid data"
             card["reason"] = "The evaluated change is not supported: " + "; ".join(result["blockers"]) + "."
     return card
 

@@ -202,7 +202,7 @@ class EvidenceTests(unittest.TestCase):
         from .ppc_evidence import decision_card, current_evaluations
         r=self.review();target=r['targets'][0]
         card=decision_card(r,target)
-        self.assertEqual((card['result'],card['action'],card['candidate_bid']),('Not enough evidence','Hold',None))
+        self.assertEqual((card['result'],card['action'],card['candidate_bid']),('Not enough evidence','Needs bid data',None))
         self.assertEqual(card['review_date'],'2026-10-21')
         save_policy('Litet',self.settings());r=self.review();d=self.candidate(r)
         result=evaluate_candidate(r,d);eid=save_evaluation('Litet',r,d,result)
@@ -216,9 +216,24 @@ class EvidenceTests(unittest.TestCase):
         response=self.client.get('/ppc?brand=Litet&start=2026-10-01&end=2026-10-19')
         self.assertIn(b'proposed test',response.data)
         record['fingerprint']='stale'
-        self.assertEqual(decision_card(r,target,record)['action'],'Hold')
+        self.assertEqual(decision_card(r,target,record)['action'],'Needs bid data')
         old=build_workspace(self.facts,'2026-09-01','2026-09-10','Litet')
         self.assertTrue(decision_card(old,old['targets'][0])['historical'])
+
+    def test_missing_bid_data_is_not_a_hold_and_losses_are_visible(self):
+        from .ppc_evidence import decision_card
+        r=self.review();target=r['targets'][0]
+        target['mature'].update(spend=27.63,ad_sales=14.99)
+        card=decision_card(r,target)
+        self.assertEqual(card['action'],'Needs bid data')
+        self.assertEqual(card['paid_result'],'Sales below ad spend')
+        self.assertEqual(card['result'],'No on mature direct paid sales')
+        self.assertIn('$27.63',card['reason'])
+        self.assertIsNone(card['candidate_bid'])
+        target['mature'].update(spend=10,ad_sales=100)
+        card=decision_card(r,target)
+        self.assertEqual(card['result'],'Not enough evidence')
+        self.assertIn('Sales cover ads',card['paid_result'])
 
     def test_both_tabs_share_evidence_all_brand_and_invalid_dates(self):
         for path in ['/ppc?brand=Litet','/decisions?brand=Litet','/ppc?brand=All','/ppc?brand=Has10']:
