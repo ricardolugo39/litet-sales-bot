@@ -308,6 +308,31 @@ def build_transaction_mart(
     )
     resolved = raw.drop_duplicates("economic_event_key", keep="first").copy()
 
+    # A payment's date can change when Amazon releases deferred funds. Match
+    # identical order-payment amounts across dates without collapsing distinct
+    # released payments, split shipments, refunds, or unmatched deferred funds.
+    lifecycle_columns = ["Order ID", "Transaction type", "Product Details"] + [
+        f"{column}_amount" for column in TRANSACTION_AMOUNT_COLUMNS
+    ]
+    resolved["_payment_key"] = _hash_frame(resolved, lifecycle_columns)
+    payments = resolved[
+        resolved["Transaction type"].eq("Order Payment")
+        & resolved["Order ID"].ne("") & resolved["Order ID"].ne("---")
+    ]
+    superseded = []
+    for _, group in payments.groupby("_payment_key"):
+        deferred = group[group["Transaction Status"].eq("Deferred")].sort_values("transaction_date")
+        released = group[group["Transaction Status"].eq("Released")].sort_values("transaction_date")
+        available = list(deferred.index)
+        for release_date in released["transaction_date"]:
+            eligible = [index for index in available
+                        if resolved.at[index, "transaction_date"] <= release_date]
+            if eligible:
+                index = eligible[-1]
+                superseded.append(index)
+                available.remove(index)
+    resolved = resolved.drop(index=superseded)
+
     order_brand, title_brand = _build_order_brand_bridge(orders, dim_product)
     resolved["order_matched"] = resolved["Order ID"].isin(order_brand)
     resolved["brand"] = resolved["Order ID"].map(order_brand).fillna("Unassigned")

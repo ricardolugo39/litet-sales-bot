@@ -105,6 +105,48 @@ class Stage1MartTests(unittest.TestCase):
         self.assertAlmostEqual(all_row["unexplained_fee_variance"], 0)
         self.assertAlmostEqual(all_row["transaction_identity_variance"], 0)
 
+    def test_release_on_later_date_supersedes_deferred_payment(self):
+        self.transactions.loc[1, "Date"] = "1/12/2026"
+        # Numeric formatting differences do not create a second payment.
+        self.transactions.loc[1, "Amazon fees"] = "-6.00"
+        marts = build_stage1_marts(self.orders, self.asins, self.ppc, self.transactions)
+        payments = marts.transaction_mart.query("transaction_type == 'Order Payment'")
+        self.assertEqual(len(payments), 1)
+        self.assertEqual(payments.iloc[0]["transaction_status"], "Released")
+        self.assertEqual(str(payments.iloc[0]["transaction_date"].date()), "2026-01-12")
+        self.assertEqual(payments["amazon_fees"].sum(), -6)
+        self.assertEqual(marts.reconciliation.query("brand == 'All'").iloc[0]["unexplained_fee_variance"], 0)
+
+    def test_lifecycle_matching_preserves_distinct_payments_and_refunds(self):
+        self.transactions.loc[1, "Date"] = "1/12/2026"
+        payment = self.transactions.iloc[1].to_dict()
+        self.transactions = pd.concat([self.transactions, pd.DataFrame([
+            {**payment, "Date": "1/13/2026"},
+            {**payment, "Date": "1/14/2026", "Transaction Status": "Deferred"},
+            {**payment, "Date": "1/15/2026", "Transaction Status": "Deferred", "Amazon fees": "-7"},
+            {**payment, "Date": "1/16/2026", "Transaction type": "Refund"},
+            {**payment, "Date": "1/17/2026", "Transaction type": "Service Fees"},
+        ])], ignore_index=True)
+        marts = build_stage1_marts(self.orders, self.asins, self.ppc, self.transactions)
+        payments = marts.transaction_mart.query("transaction_type == 'Order Payment'")
+        self.assertEqual(len(payments), 4)
+        self.assertEqual(payments["is_released"].sum(), 2)
+        self.assertEqual(payments["is_deferred"].sum(), 2)
+        self.assertEqual(len(marts.transaction_mart.query("transaction_type == 'Refund'")), 1)
+        self.assertEqual(len(marts.transaction_mart.query("transaction_type == 'Service Fees'")), 2)
+
+    def test_release_matches_only_one_earlier_deferred_payment(self):
+        self.transactions.loc[1, "Date"] = "1/12/2026"
+        deferred = self.transactions.iloc[0].to_dict()
+        self.transactions = pd.concat([self.transactions, pd.DataFrame([
+            {**deferred, "Date": "1/4/2026"},
+        ])], ignore_index=True)
+        marts = build_stage1_marts(self.orders, self.asins, self.ppc, self.transactions)
+        payments = marts.transaction_mart.query("transaction_type == 'Order Payment'")
+        self.assertEqual(len(payments), 2)
+        self.assertEqual(payments["is_released"].sum(), 1)
+        self.assertEqual(payments["is_deferred"].sum(), 1)
+
     def test_materialization_is_idempotent(self):
         marts = build_stage1_marts(self.orders, self.asins, self.ppc, self.transactions)
         conn = sqlite3.connect(":memory:")

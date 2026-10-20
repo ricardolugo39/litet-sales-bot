@@ -67,3 +67,25 @@ The local source database and offline cache provide recoverable snapshots. To
 restore Railway, point `LITET_DB_PATH` locally at the desired validated snapshot
 and rerun `scripts/sync_database.py`. The current Railway intervention table is
 preserved during restoration.
+
+## Rebuilding payment lifecycle fees
+
+A Deferred Order Payment and its later Released version are one payment even
+when their dates differ. Stage 1 matches equal order IDs, product details and
+normalized monetary components one-to-one, retaining the Released record and
+its date. Separate Released payments, refunds, unmatched Deferred payments and
+nonmatching amounts remain separate. Without a payment identifier, ambiguous
+extra records are retained rather than silently deleted.
+
+To rebuild fee-dependent marts without changing raw sources, dimensions, or
+COGS, run:
+
+```sh
+python scripts/rebuild_fee_analytics.py original.db rebuilt.db
+```
+
+The destination must be new. The command rebuilds transactions, fee ledger and
+reconciliation, sales profitability, and dependent PPC contribution metrics.
+It validates the resulting database before it can be uploaded using the normal
+snapshot workflow. Preserve the original database for rollback; review the
+matched-date comparison before publishing the rebuilt candidate.
