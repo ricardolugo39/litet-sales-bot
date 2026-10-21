@@ -195,6 +195,16 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(result['contribution'],30)  # 35 clicks * .8 = 28 advertising.
         self.assertEqual(result['exact_fee_share'],1)
 
+    def test_matched_company_dates_exclude_other_days_and_do_not_invent_sessions(self):
+        from .ppc_evidence import company_evidence
+        with sqlite3.connect(self.facts) as c:
+            c.row_factory=sqlite3.Row
+            result=company_evidence(c,'Litet','2026-10-01','2026-10-03',allowed_dates=['2026-10-01','2026-10-03'])
+        self.assertEqual(result['days'],2)
+        self.assertEqual(result['sales'],160)
+        self.assertEqual(result['spend'],56)
+        self.assertIsNone(result['sessions'])
+
     def test_policy_rejects_fractional_lookback(self):
         with self.assertRaises(ValueError):save_policy('Litet',self.settings(prior_lookback_days='28.5'))
 
@@ -234,6 +244,16 @@ class EvidenceTests(unittest.TestCase):
         card=decision_card(r,target)
         self.assertEqual(card['result'],'Economics unavailable')
         self.assertIn('Sales cover ads',card['paid_result'])
+
+    def test_historical_candidate_is_not_a_verified_current_bid_or_approved_proposal(self):
+        from .ppc_evidence import decision_card
+        r=self.review();t=r['targets'][0]
+        t['bid_history']=dict(available=True,recommended_bid=1.2,last_recorded_bid=1.2,last_recorded_at='2026-09-21',pending_latest=False,company_context_conflict=False,reason='Recorded comparison')
+        card=decision_card(r,t)
+        self.assertEqual(card['action'],'Keep recorded setting')
+        self.assertEqual(card['recorded_setting']['recommended_bid'],1.2)
+        self.assertIsNone(card['current_bid']);self.assertIsNone(card['candidate_bid'])
+        self.assertIn('not a verified live setting',card['reason'])
 
     def test_both_tabs_share_evidence_all_brand_and_invalid_dates(self):
         for path in ['/ppc?brand=Litet','/decisions?brand=Litet','/ppc?brand=All','/ppc?brand=Has10']:

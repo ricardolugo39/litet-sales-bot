@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from .reporting_dates import amazon_us_reporting_date
 
-MODEL_VERSION = "ppc-evidence-2"
+MODEL_VERSION = "ppc-evidence-3"
 DEFAULTS = {
     "attribution_days": 7,  # The loaded report's 7 Day attribution definition.
     "prior_lookback_days": 28,
@@ -129,9 +129,12 @@ def _table(conn, name):
     return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
 
 
-def company_evidence(conn, brand, start, end):
+def company_evidence(conn, brand, start, end, allowed_dates=None):
     """Orders and ad spend on matching Pacific dates; no traffic interpolation."""
     if end < start:
+        return None
+    allowed = {d for d in allowed_dates if start <= d <= end} if allowed_dates is not None else None
+    if allowed is not None and not allowed:
         return None
     clause, args = ("1=1", []) if brand == "All" else ("p.canonical_brand=?", [brand])
     rows = conn.execute(f'''SELECT o."amazon-order-id" order_id,o.asin,o."purchase-date" timestamp,
@@ -141,10 +144,11 @@ def company_evidence(conn, brand, start, end):
        WHERE {clause} AND CAST(o.quantity AS REAL)>0
        AND COALESCE(o."order-status",'') NOT IN ('Cancelled','Canceled')
        AND COALESCE(o."item-status",'') NOT IN ('Cancelled','Canceled')''', args).fetchall()
-    selected = [r for r in rows if amazon_us_reporting_date(r["timestamp"]) and start <= amazon_us_reporting_date(r["timestamp"]) <= end]
+    selected = [r for r in rows if amazon_us_reporting_date(r["timestamp"]) and start <= amazon_us_reporting_date(r["timestamp"]) <= end and (allowed is None or amazon_us_reporting_date(r["timestamp"]) in allowed)]
     ad_clause, ad_args = ("1=1", []) if brand == "All" else ("brand=?", [brand])
-    ad = conn.execute(f"SELECT SUM(spend) spend,COUNT(DISTINCT report_date) days FROM ppc_fact_clean WHERE {ad_clause} AND report_date BETWEEN ? AND ?", [*ad_args, start, end]).fetchone()
-    days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+    date_filter = " AND report_date IN (" + ",".join("?" for _ in allowed) + ")" if allowed is not None else ""
+    ad = conn.execute(f"SELECT SUM(spend) spend,COUNT(DISTINCT report_date) days FROM ppc_fact_clean WHERE {ad_clause} AND report_date BETWEEN ? AND ?{date_filter}", [*ad_args, start, end, *(sorted(allowed) if allowed is not None else [])]).fetchone()
+    days = len(allowed) if allowed is not None else (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
     sales = sum(r["sales"] or 0 for r in selected)
     spend = ad["spend"] or 0
     result = {"daily_sales": {}, "start": start, "end": end, "days": days, "sales": sales, "packs": sum(r["packs"] for r in selected), "spend": spend, "ad_days": ad["days"], "tacos": spend / sales if sales and ad["days"] == days else None, "sales_per_day": sales / days, "spend_per_day": spend / days if ad["days"] == days else None, "sessions": None, "session_reason": "Compatible cumulative traffic boundaries are unavailable", "contribution": None, "contribution_per_day": None, "exact_fee_share": None, "conversion": None}
@@ -194,7 +198,7 @@ def company_evidence(conn, brand, start, end):
                       contribution=contribution-spend if not missing and ad["days"] == days and selected else None,
                       before_ads=contribution if not missing and selected else None)
         result["contribution_per_day"] = result["contribution"] / days if result["contribution"] is not None else None
-    if _table(conn, "business_traffic") and start[:7] == end[:7]:
+    if allowed is None and _table(conn, "business_traffic") and start[:7] == end[:7]:
         month_start = start[:7] + "-01"
         boundary = (date.fromisoformat(start) - timedelta(days=1)).isoformat()
         def snapshot(day):
@@ -264,11 +268,13 @@ def build_workspace(path, start, end, brand, today=None):
             leader["guidance"] = "Largest recorded paid-traffic source; assess visibility risk before testing"
         queries = [dict(r) for r in conn.execute(f"SELECT campaign_name,ad_group_name,target,match_type,search_term,SUM(clicks) clicks,SUM(spend) spend,SUM(ad_orders) orders,SUM(ad_sales) sales FROM ppc_fact_clean WHERE {clause} AND report_date BETWEEN ? AND ? GROUP BY campaign_name,ad_group_name,target,match_type,search_term ORDER BY SUM(spend) DESC LIMIT 40", [*args, start, complete])]
         interventions = []
+        bid_events = []
         with sqlite3.connect(f"file:{state_path()}?mode=ro", uri=True) if Path(state_path()).exists() else sqlite3.connect(":memory:") as state:
             state.row_factory = sqlite3.Row
             if _table(state, "interventions"):
                 ic, ia = ("1=1", []) if brand == "All" else ("brand=?", [brand])
                 interventions = [dict(r) for r in state.execute(f"SELECT rowid AS audit_id,* FROM interventions WHERE {ic} ORDER BY created_at DESC,rowid DESC LIMIT 50", ia)]
+                bid_events = [dict(r) for r in state.execute(f"SELECT rowid AS audit_id,* FROM interventions WHERE {ic} AND executed_at IS NOT NULL ORDER BY executed_at,rowid", ia)]
         company = company_evidence(conn, brand, start, complete) if complete >= start else None
         recent_start = max(start, (date.fromisoformat(mature_end) + timedelta(days=1)).isoformat())
         recent_company = company_evidence(conn, brand, recent_start, complete) if recent_start <= complete else None
@@ -277,6 +283,20 @@ def build_workspace(path, start, end, brand, today=None):
             target["recent_period_present"] = recent_start <= complete
             target["recent_click_share"] = target["recent"]["clicks"] / recent_totals["clicks"] if recent_totals["clicks"] else None
             target["past_changes"] = [i for i in interventions if i.get("brand") == target["brand"] and i.get("campaign_name") == target["campaign_name"] and i.get("ad_group_name") == target["ad_group_name"] and i.get("entity_name") == target["target"] and i.get("match_type") == target["match_type"]]
+        from .ppc_bid_history import recorded_bid_assessment
+        company_cache = {}
+        for target in targets:
+            key = (target["brand"], *(target[k] for k in IDENTITY))
+            def context(days):
+                cache_key = (target["brand"], tuple(days))
+                if cache_key not in company_cache:
+                    company_cache[cache_key] = company_evidence(conn,target["brand"],min(days),max(days),allowed_dates=days)
+                return company_cache[cache_key]
+            from .analytics import PRICE_CHANGE_PROMOTION_DAYS
+            target["bid_history"] = recorded_bid_assessment(target,all_groups[key],bid_events,mature_end,
+                {r["report_date"] for r in facts if r["brand"] == target["brand"]},
+                PRICE_CHANGE_PROMOTION_DAYS if target["brand"] == "Litet" else (),context,
+                asof=today.isoformat() if complete == (today-timedelta(days=1)).isoformat() else complete,attribution_days=policy["attribution_days"])
         market = {"captured_at": None, "keywords": {}}
         if _table(conn, "helium_snapshots"):
             snapshot = conn.execute("SELECT captured_at,payload_json FROM helium_snapshots ORDER BY captured_at DESC,id DESC LIMIT 1").fetchone()
@@ -308,7 +328,7 @@ def build_workspace(path, start, end, brand, today=None):
                     target["correlation"]["promotion_excluded_days"] = len(without_promos)
         mature_days = {r["report_date"] for r in facts if start <= r["report_date"] <= mature_end}
         expected_days = (date.fromisoformat(mature_end) - date.fromisoformat(start)).days + 1 if mature_end >= start else 0
-        signature = {"model": MODEL_VERSION, "brand": brand, "start": start, "end": end, "complete": complete, "policy_id": policy["id"], "source": freshness, "company": company, "recent_company": recent_company, "market": market, "queries": queries, "daily_target_facts": facts, "executed_changes": [{k: i.get(k) for k in ("brand", "campaign_name", "ad_group_name", "entity_name", "match_type", "new_value", "executed_at")} for i in interventions if i.get("executed_at")], "targets": [{"key": t["key"], "selected": t["selected"], "mature": t["mature"], "rate": t["rate"], "history_model": t["history_model"], "economics": t["economics"]} for t in targets]}
+        signature = {"model": MODEL_VERSION, "brand": brand, "start": start, "end": end, "complete": complete, "policy_id": policy["id"], "source": freshness, "company": company, "recent_company": recent_company, "market": market, "queries": queries, "daily_target_facts": facts, "executed_changes": [{k: i.get(k) for k in ("brand", "campaign_name", "ad_group_name", "entity_name", "match_type", "new_value", "executed_at")} for i in interventions if i.get("executed_at")], "targets": [{"key": t["key"], "selected": t["selected"], "mature": t["mature"], "rate": t["rate"], "history_model": t["history_model"], "economics": t["economics"], "bid_history": t["bid_history"]} for t in targets]}
         fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
     return {"model_version": MODEL_VERSION, "policy": policy, "fingerprint": fingerprint, "start": start, "end": end, "complete": complete, "mature_end": mature_end, "mature_start": start if expected_days else None, "attribution_cutoff": cutoff, "loaded_mature_days": len(mature_days), "expected_mature_days": expected_days, "totals": totals, "targets": targets, "queries": queries, "company": company, "recent_company": recent_company, "market": market, "recent_start": recent_start, "interventions": interventions, "freshness": freshness, "daily_review_dates": sorted({r["report_date"] for r in facts if start <= r["report_date"] <= complete}), "today": today.isoformat(), "halo_share": totals["other_sku_sales"] / totals["ad_sales"] if totals["ad_sales"] else None}
 
@@ -421,6 +441,28 @@ def decision_card(workspace, target, evaluation=None):
     assessment = assess_paid_economics(target,target["economics"])
     card.update(result=assessment["result"], action=assessment["action"], reason=assessment["reason"], assessment=assessment)
     card["review_condition"] = "Refresh the history and compare modeled CPC economics with actual delivery. Verify the current base bid only when converting this direction into a bid amount."
+    card["recorded_setting"] = target.get("bid_history", {"available":False})
+    if card["recorded_setting"]["available"]:
+        recorded = card["recorded_setting"]
+        if recorded["recommended_bid"] is not None:
+            card["action"] = "Keep recorded setting" if recorded["recommended_bid"] == recorded["last_recorded_bid"] else "Retest recorded setting"
+            card["reason"] = f"Historical candidate: ${recorded['recommended_bid']:.2f} base bid. " + recorded["reason"] + " This is not a verified live setting."
+            if recorded["pending_latest"]:
+                card["action"] = "Let recorded change mature"
+                card["reason"] = f"The latest recorded bid is ${recorded['last_recorded_bid']:.2f} and has no mature comparison yet. Keep this recorded setting while its attribution develops; earlier settings remain historical references."
+                card["review_date"] = max(card["review_date"],recorded["pending_review_after"])
+            elif recorded["company_context_conflict"]:
+                card["reason"] += " Company-wide contribution moved the other way during these periods; a controlled company-level test is needed before claiming an improvement."
+        elif recorded["no_profitable_setting"]:
+            card["reason"] = "None of the compared recorded settings covered product costs, fees and ads across the observed margin scenarios. " + assessment["reason"]
+            if assessment["action"] in {"Reduce", "Test reduction"}:
+                card["action"] = "Test pause / restructure"
+                card["reason"] = "Both recorded settings lost estimated direct contribution in the matched comparison. Propose a monitored pause or query restructure rather than inventing a lower bid. Watch company contribution and traffic; this comparison does not establish incremental lift."
+        else:
+            card["reason"] = "A recorded bid exists, but incomplete product economics prevent a comparable bid ranking. " + assessment["reason"]
+    if target.get("recent_period_present") and not target["recent"]["clicks"] and card["recorded_setting"]["available"]:
+        card["action"] = "Review delivery; recorded bid is a reference"
+        card["reason"] += " No clicks are recorded in the recent period; check whether the target is already inactive before changing delivery."
     if card["historical"]:
         card["action"] = "Historical assessment"
         card["reason"] = "This is a historical or stale window. Review the latest complete dates before making today's bid decision."

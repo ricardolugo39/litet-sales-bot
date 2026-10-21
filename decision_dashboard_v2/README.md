@@ -154,3 +154,43 @@ proposal/approval checks.
 The older `prior_lookback_days` field is retained only for policy-form compatibility; it is no longer an editable history limiter. History length is selected by forward tests.
 
 Historical validation is retrospective on the latest loaded attribution values. Archived report vintages are not available, so it does not reconstruct exactly what was knowable on each earlier decision date. Prospective test outcomes remain necessary.
+
+## Recorded base-bid settings (ppc-evidence-3)
+
+`ppc_bid_history.py` compares actual executed changes for an exact
+brand/campaign/ad-group/target/match identity. It reads the complete executed log,
+not only the 50 records shown in the UI. Unexecuted proposals and mismatched targets
+are excluded. Old July logs without a match type or complete matching identity
+are not silently merged into a different keyword.
+
+Each executed setting is evaluated after its change day and before the next
+recorded change, using only attribution-mature outcomes. Legacy naive server
+timestamps can straddle Pacific midnight; both candidate change dates are excluded.
+Known promotion days are excluded. The first recorded pre-change baseline may be
+used with the reported old bid, explicitly labeled weaker evidence than archived
+settings snapshots. Unlogged settings, pauses and budget changes cannot be ruled
+out; run persistence is an assumption, not a verified configuration history.
+
+For each distinct price the latest observed run is retained as the candidate;
+selection never cherry-picks the most profitable run. The most recent balanced
+weekdays per run give equal reporting-day counts and weekday distributions.
+Missing target rows count as zero delivery only on loaded brand-report dates;
+report completeness is still unverified. Exact matched dates and source provenance
+are displayed. Candidate ranking maximizes observed direct paid contribution/day
+at the lowest observed SKU margin. This is an explicitly conservative scenario
+criterion, not a causal optimizer or an estimate of company-wide incremental lift.
+
+Company revenue, TaCoS and contribution are recomputed on exactly those matched
+calendar dates. They remain context because other simultaneous changes are included;
+if company contribution moves against the direct-paid comparison the conflict is
+flagged. Product-mix ranges are not confidence intervals. Where no tested setting
+covered costs, the UI says so instead of recommending the least-loss-making setting
+as profitable; an existing loss assessment may suggest a human-reviewed pause or
+restructure test.
+
+The output is a concrete historical base-bid candidate plus the last-recorded
+amount/date. It never populates verified current-bid or executable candidate fields
+and does not bypass existing scenario/approval safeguards. A newly recorded change
+whose attribution is still pending is kept pending rather than immediately reversed
+using older comparisons. The next review accounts for that change's maturity date.
+No CPC-to-bid ratio or fixed percentage-cut rule is used. No Amazon setting is changed.
