@@ -152,3 +152,5 @@ cost coverage, long-history sensitivity, inactive delivery and the existing
 proposal/approval checks.
 
 The older `prior_lookback_days` field is retained only for policy-form compatibility; it is no longer an editable history limiter. History length is selected by forward tests.
+
+Historical validation is retrospective on the latest loaded attribution values. Archived report vintages are not available, so it does not reconstruct exactly what was knowable on each earlier decision date. Prospective test outcomes remain necessary.
