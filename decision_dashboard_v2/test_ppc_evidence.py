@@ -202,7 +202,7 @@ class EvidenceTests(unittest.TestCase):
         from .ppc_evidence import decision_card, current_evaluations
         r=self.review();target=r['targets'][0]
         card=decision_card(r,target)
-        self.assertEqual((card['result'],card['action'],card['candidate_bid']),('Not enough evidence','Needs bid data',None))
+        self.assertEqual((card['result'],card['action'],card['candidate_bid']),('Economics unavailable','Review economics',None))
         self.assertEqual(card['review_date'],'2026-10-21')
         save_policy('Litet',self.settings());r=self.review();d=self.candidate(r)
         result=evaluate_candidate(r,d);eid=save_evaluation('Litet',r,d,result)
@@ -212,11 +212,11 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(card['action'],'Reduce')
         self.assertAlmostEqual(card['change_pct'],1.9/2-1)
         self.assertIn('proposed test',card['reason'])
-        self.assertEqual(card['result'],'Not enough evidence')  # A forecast is not observed success.
+        self.assertEqual(card['result'],'Economics unavailable')  # A forecast is not observed success.
         response=self.client.get('/ppc?brand=Litet&start=2026-10-01&end=2026-10-19')
         self.assertIn(b'proposed test',response.data)
         record['fingerprint']='stale'
-        self.assertEqual(decision_card(r,target,record)['action'],'Needs bid data')
+        self.assertEqual(decision_card(r,target,record)['action'],'Review economics')
         old=build_workspace(self.facts,'2026-09-01','2026-09-10','Litet')
         self.assertTrue(decision_card(old,old['targets'][0])['historical'])
 
@@ -225,14 +225,14 @@ class EvidenceTests(unittest.TestCase):
         r=self.review();target=r['targets'][0]
         target['mature'].update(spend=27.63,ad_sales=14.99)
         card=decision_card(r,target)
-        self.assertEqual(card['action'],'Needs bid data')
+        self.assertEqual(card['action'],'Review economics')
         self.assertEqual(card['paid_result'],'Sales below ad spend')
-        self.assertEqual(card['result'],'Historical paid loss; current result unconfirmed')
-        self.assertIn('$27.63',card['reason'])
+        self.assertEqual(card['result'],'Economics unavailable')
+        self.assertIn('Current base bids are not needed',card['reason'])
         self.assertIsNone(card['candidate_bid'])
         target['mature'].update(spend=10,ad_sales=100)
         card=decision_card(r,target)
-        self.assertEqual(card['result'],'Not enough evidence')
+        self.assertEqual(card['result'],'Economics unavailable')
         self.assertIn('Sales cover ads',card['paid_result'])
 
     def test_both_tabs_share_evidence_all_brand_and_invalid_dates(self):

@@ -52,9 +52,8 @@ order/ASIN, with dated Litet FBA/referral estimates explicitly included in cover
 Incomplete costs or PPC-day coverage suppress contribution totals.
 
 The statistical model is Gamma-Poisson attributed orders per click, allowing
-multiple orders per click. Earlier same-brand, same-match-type peers provide the
-prior; absent peer evidence produces no modeled rate. The initial visible
-assumptions (7-day attribution exclusion, 28-day prior lookback, 10 equivalent
+multiple orders per click. Earlier exact-target history supplies the prior; same-brand, same-match-type peers are a fallback when the target has no positive order history. No usable historical order evidence produces no modeled rate. The initial visible
+assumptions (7-day attribution exclusion, forward-selected history, 10 equivalent
 prior clicks, 80% interval) are configurable starting assumptions, not learned
 business rules. Risk tolerance, profit reserve and minimum traffic retention
 are unset until explicitly saved as a versioned brand policy.
@@ -94,7 +93,7 @@ python -m unittest decision_dashboard_v2.test_ppc_evidence decision_dashboard_v2
 PPC and Decisions lead with three priority targets (ranked by selected-period spend),
 with the remaining targets available in a collapsed list. Each card shows observed
 working status, Hold/Increase/Reduce, supported bid amounts, a reason and the next
-attribution-review checkpoint. Missing bid evidence is labeled "Needs bid data / Not calculated", never an automatic Hold;
+attribution-review checkpoint. Current bid access does not gate a historical paid-economics assessment;
 a conditional experiment is never labeled proven success. Only a current matching
 evaluation that passes the existing guardrails can show a numerical proposed change.
 The latest evaluation per exact target persists when returning to the page; stale
@@ -109,3 +108,47 @@ company-wide incremental contribution. Recent results remain separately labeled,
 and matching purchased-product costs are required before calling revenue above
 ad spend profitable. Hold is reserved for an evaluated candidate rejected with
 a currently verified bid; no candidate or missing bid data is not evidence for Hold.
+
+## Historical assessment (ppc-evidence-2)
+
+`ppc_history.py` assesses each exact brand/campaign/ad-group/target/match identity
+using all available attribution-mature history. Prior history ends before the
+selected start; selected mature clicks update the prior. Recent attributed orders
+never train the model. Candidate history lengths are the available reporting-month
+counts, chosen by forward-only negative-binomial order prediction. The final earlier
+month is withheld from window selection for a separate, limited audit. All-history
+sensitivity must also support an affirmative or negative interval verdict. Prior
+weight remains explicit and is capped by observed source clicks to prevent tiny
+samples supplying invented evidence. Targets with no mature clicks remain pending.
+
+The economic inputs are the latest available month per SKU, up to the decision
+cutoff, using exact allocated Amazon fees and recorded COGS. The minimum and maximum
+observed SKU margins form an explicit purchased-mix scenario. Current purchased ASIN
+mix is not known, so this is not a guaranteed profit bound. Missing product coverage
+is labeled and cannot become a confident whole-catalog result. New-product catalog
+membership respects first observed dates in historical views.
+
+Measured recent CPC (or selected mature CPC when no recent clicks exist) is compared
+with modeled contribution per click. The central break-even CPC range reflects
+product-margin scenarios; the larger sensitivity range includes order-rate, history
+length and observed average-order-value scenarios. These are model-conditional,
+not independently calibrated future-profit confidence bounds. Rates and order values
+can change with prices, query quality and placement. Outputs can be Reduce,
+Test reduction, Hold, Hold/test expansion or product-mix review, without requiring a
+current base bid or saved business policy. Targets without recent clicks are routed
+to delivery review, not blindly told to reduce an already inactive bid.
+
+A historical economic direction is distinct from an executable bid proposal. The
+existing policy, current settings, response-source, scenario, fingerprint, CSRF and
+human approval checks still gate numeric base-bid proposals and remain unchanged.
+There is no CPC-to-base-bid proportional shortcut and no automatic Amazon action.
+Company-level TaCoS, contribution, traffic concentration and descriptive correlations
+remain separate context; organic lift and cannibalization are not inferred from
+paid-attributed profitability.
+
+Tests cover as-of costs, future-outcome leakage, the held-out audit, thin-history
+prior caps, positive/negative/mixed directions without any base-bid input, missing
+cost coverage, long-history sensitivity, inactive delivery and the existing
+proposal/approval checks.
+
+The older `prior_lookback_days` field is retained only for policy-form compatibility; it is no longer an editable history limiter. History length is selected by forward tests.

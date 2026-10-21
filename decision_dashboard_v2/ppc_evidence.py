@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from .reporting_dates import amazon_us_reporting_date
 
-MODEL_VERSION = "ppc-evidence-1"
+MODEL_VERSION = "ppc-evidence-2"
 DEFAULTS = {
     "attribution_days": 7,  # The loaded report's 7 Day attribution definition.
     "prior_lookback_days": 28,
@@ -220,7 +220,6 @@ def build_workspace(path, start, end, brand, today=None):
         # A source date proves report availability, not Seller Central completeness.
         cutoff = min((today - timedelta(days=policy["attribution_days"] + 1)).isoformat(), (date.fromisoformat(freshness["latest"]) - timedelta(days=policy["attribution_days"])).isoformat()) if freshness["latest"] else (today - timedelta(days=policy["attribution_days"] + 1)).isoformat()
         mature_end = min(complete, cutoff)
-        prior_end = (date.fromisoformat(start) - timedelta(days=1)).isoformat()
         cols = {r[1] for r in conn.execute("PRAGMA table_info(ppc_fact_clean)")}
         extra = ",other_sku_sales" if "other_sku_sales" in cols else ",NULL AS other_sku_sales"
         facts = [dict(r) for r in conn.execute(f"SELECT report_date,brand,campaign_name,ad_group_name,target,match_type,impressions,clicks,spend,ad_orders,ad_sales{extra} FROM ppc_fact_clean WHERE {clause} AND report_date<=?", [*args, complete])]
@@ -236,11 +235,6 @@ def build_workspace(path, start, end, brand, today=None):
             mature = total([r for r in rows if r["report_date"] <= mature_end])
             target["mature"] = mature
             target["recent"] = total([r for r in rows if r["report_date"] > mature_end])
-            # Earlier same-match-type peers, same brand; no future look-ahead.
-            prior_start = (date.fromisoformat(min(prior_end, cutoff)) - timedelta(days=policy["prior_lookback_days"] - 1)).isoformat()
-            peer = total([r for r in facts if r["report_date"] >= prior_start and r["brand"] == target["brand"] and r["match_type"] == target["match_type"] and r["report_date"] <= min(prior_end, cutoff) and tuple(r[k] for k in IDENTITY) != key[1:]])
-            seed = int(hashlib.sha256(repr(key).encode()).hexdigest()[:12], 16)
-            target["rate"] = rate_model(mature["clicks"], mature["ad_orders"], peer["clicks"], peer["ad_orders"], policy, seed)
             target["key"] = hashlib.sha256(json.dumps(key).encode()).hexdigest()
             target["click_share"] = target["selected"]["clicks"] / totals["clicks"] if totals["clicks"] else None
             target["impression_share"] = target["selected"]["impressions"] / totals["impressions"] if totals["impressions"] else None
@@ -251,6 +245,19 @@ def build_workspace(path, start, end, brand, today=None):
             target["guidance"] = "Review evidence; no calculated bid change"
             target["is_actionable"] = False
             targets.append(target)
+        from .ppc_history import historical_model, product_margin_scenarios
+        all_groups = {}
+        for row in facts:
+            key = (row["brand"], *(row[k] for k in IDENTITY))
+            all_groups.setdefault(key, []).append(row)
+        economics = {b: product_margin_scenarios(conn,b,complete) for b in {t["brand"] for t in targets}}
+        for target in targets:
+            key = (target["brand"], *(target[k] for k in IDENTITY))
+            peers = [r for k,rows in all_groups.items() if k != key and k[0] == key[0] and k[-1] == key[-1] for r in rows]
+            seed = int(hashlib.sha256(repr(key).encode()).hexdigest()[:12], 16)
+            target["history_model"] = historical_model(all_groups[key],peers,start,mature_end,policy,rate_model,seed)
+            target["rate"] = target["history_model"]["rate"]
+            target["economics"] = economics[target["brand"]]
         targets.sort(key=lambda r: (-r["selected"]["spend"], r["key"]))
         leader = max(targets, key=lambda r: r["selected"]["clicks"], default=None)
         if leader and leader["selected"]["clicks"]:
@@ -267,6 +274,7 @@ def build_workspace(path, start, end, brand, today=None):
         recent_company = company_evidence(conn, brand, recent_start, complete) if recent_start <= complete else None
         recent_totals = total([r for r in facts if recent_start <= r["report_date"] <= complete])
         for target in targets:
+            target["recent_period_present"] = recent_start <= complete
             target["recent_click_share"] = target["recent"]["clicks"] / recent_totals["clicks"] if recent_totals["clicks"] else None
             target["past_changes"] = [i for i in interventions if i.get("brand") == target["brand"] and i.get("campaign_name") == target["campaign_name"] and i.get("ad_group_name") == target["ad_group_name"] and i.get("entity_name") == target["target"] and i.get("match_type") == target["match_type"]]
         market = {"captured_at": None, "keywords": {}}
@@ -300,7 +308,7 @@ def build_workspace(path, start, end, brand, today=None):
                     target["correlation"]["promotion_excluded_days"] = len(without_promos)
         mature_days = {r["report_date"] for r in facts if start <= r["report_date"] <= mature_end}
         expected_days = (date.fromisoformat(mature_end) - date.fromisoformat(start)).days + 1 if mature_end >= start else 0
-        signature = {"model": MODEL_VERSION, "brand": brand, "start": start, "end": end, "complete": complete, "policy_id": policy["id"], "source": freshness, "company": company, "recent_company": recent_company, "market": market, "queries": queries, "daily_target_facts": facts, "executed_changes": [{k: i.get(k) for k in ("brand", "campaign_name", "ad_group_name", "entity_name", "match_type", "new_value", "executed_at")} for i in interventions if i.get("executed_at")], "targets": [{"key": t["key"], "selected": t["selected"], "mature": t["mature"], "rate": t["rate"]} for t in targets]}
+        signature = {"model": MODEL_VERSION, "brand": brand, "start": start, "end": end, "complete": complete, "policy_id": policy["id"], "source": freshness, "company": company, "recent_company": recent_company, "market": market, "queries": queries, "daily_target_facts": facts, "executed_changes": [{k: i.get(k) for k in ("brand", "campaign_name", "ad_group_name", "entity_name", "match_type", "new_value", "executed_at")} for i in interventions if i.get("executed_at")], "targets": [{"key": t["key"], "selected": t["selected"], "mature": t["mature"], "rate": t["rate"], "history_model": t["history_model"], "economics": t["economics"]} for t in targets]}
         fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
     return {"model_version": MODEL_VERSION, "policy": policy, "fingerprint": fingerprint, "start": start, "end": end, "complete": complete, "mature_end": mature_end, "mature_start": start if expected_days else None, "attribution_cutoff": cutoff, "loaded_mature_days": len(mature_days), "expected_mature_days": expected_days, "totals": totals, "targets": targets, "queries": queries, "company": company, "recent_company": recent_company, "market": market, "recent_start": recent_start, "interventions": interventions, "freshness": freshness, "daily_review_dates": sorted({r["report_date"] for r in facts if start <= r["report_date"] <= complete}), "today": today.isoformat(), "halo_share": totals["other_sku_sales"] / totals["ad_sales"] if totals["ad_sales"] else None}
 
@@ -401,32 +409,20 @@ def decision_card(workspace, target, evaluation=None):
     today = date.fromisoformat(workspace["today"])
     recent = [r for r in workspace.get("daily_review_dates", []) if r > workspace["mature_end"]]
     next_date = max(today + timedelta(days=1), date.fromisoformat(min(recent)) + timedelta(days=workspace["policy"]["attribution_days"] + 1)) if recent else today + timedelta(days=1)
-    card = {"result": "Not enough evidence", "action": "Needs bid data", "current_bid": None,
+    card = {"result": "Assessment pending", "action": "Review history", "current_bid": None,
             "candidate_bid": None, "change_pct": None, "review_date": next_date.isoformat(),
             "reason": "A reliable bid change needs verified current settings, product margins and evidence of how traffic responds.",
             "review_condition": "Refresh attribution and verify the current bid, product margins and traffic response before changing it.",
             "historical": workspace["complete"] != (today - timedelta(days=1)).isoformat()}
-    if target["recent"]["clicks"]:
-        share = target.get("recent_click_share")
-        traffic = f"It brings {share:.1%} of recent paid clicks; " if share is not None else "Recent paid traffic is recorded; "
-        card["reason"] = traffic + "recent sales attribution is still developing and a specific bid change is not supported yet."
     mature = target["mature"]
-    card["paid_result"] = "No mature spend"
-    card["paid_shortfall"] = None
-    if mature["spend"] > 0:
-        card["paid_shortfall"] = mature["spend"] - mature["ad_sales"]
-        if mature["ad_sales"] < mature["spend"]:
-            card["paid_result"] = "Sales below ad spend"
-            # An accounting observation, not a causal or company-wide verdict.
-            card["result"] = "Historical paid loss; current result unconfirmed"
-            card["reason"] = f"Mature attributed sales of ${mature['ad_sales']:,.2f} did not cover ${mature['spend']:,.2f} of ads, before product costs and fees. Investigate this loss; it does not by itself determine today's bid."
-            if target["recent"]["spend"] > 0:
-                card["reason"] += f" Recent, incomplete attribution shows ${target['recent']['ad_sales']:,.2f} sales on ${target['recent']['spend']:,.2f} spend; verify whether settings changed before applying the earlier result."
-        else:
-            card["paid_result"] = "Sales cover ads; product costs still matter"
-            card["reason"] = f"Mature attributed sales of ${mature['ad_sales']:,.2f} exceed ${mature['spend']:,.2f} of ad spend. Purchased-product costs and fees must be matched before calling this profitable or choosing an increase."
-    card["review_condition"] += " A later date alone will not supply missing bid settings or purchased-product evidence."
+    card["paid_shortfall"] = mature["spend"] - mature["ad_sales"] if mature["spend"] else None
+    card["paid_result"] = ("Sales below ad spend" if mature["ad_sales"] < mature["spend"] else "Sales cover ads; product costs still matter") if mature["spend"] else "No mature spend"
+    from .ppc_history import assess_paid_economics
+    assessment = assess_paid_economics(target,target["economics"])
+    card.update(result=assessment["result"], action=assessment["action"], reason=assessment["reason"], assessment=assessment)
+    card["review_condition"] = "Refresh the history and compare modeled CPC economics with actual delivery. Verify the current base bid only when converting this direction into a bid amount."
     if card["historical"]:
+        card["action"] = "Historical assessment"
         card["reason"] = "This is a historical or stale window. Review the latest complete dates before making today's bid decision."
     if evaluation and evaluation.get("fingerprint") == workspace["fingerprint"] and evaluation.get("model_version") == workspace["model_version"] and evaluation.get("policy_id") == workspace["policy"]["id"] and evaluation["result"]["target_key"] == target["key"]:
         result = evaluate_candidate(workspace, evaluation["payload"])
@@ -439,7 +435,7 @@ def decision_card(workspace, target, evaluation=None):
                         reason=f"Documented test scenario estimates ${result['mean_gain']:,.2f}/day more company contribution than holding, within your saved guardrails. This is a proposed test, not proven success.",
                         review_condition="Confirm actual execution, then review refreshed attribution against the documented hypothesis and reversal condition.")
         else:
-            card["action"] = "Hold" if card["current_bid"] is not None else "Needs bid data"
+            card["action"] = "Hold — evaluated change rejected" if card["current_bid"] is not None else assessment["action"]
             card["reason"] = "The evaluated change is not supported: " + "; ".join(result["blockers"]) + "."
     return card
 
