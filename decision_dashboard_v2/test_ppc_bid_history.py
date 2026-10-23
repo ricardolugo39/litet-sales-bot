@@ -55,4 +55,29 @@ class RecordedBidTests(unittest.TestCase):
         self.assertTrue(r['available']);self.assertTrue(r['no_profitable_setting']);self.assertIsNone(r['recommended_bid'])
         self.assertFalse(r['comparison_available'])
 
+    def comparison(self, low_traffic=False, company_gain=True, profitable=True):
+        days=['2026-09-02','2026-09-09','2026-09-16','2026-09-23']
+        rows=[]
+        for d in days:
+            earlier=d<'2026-09-15'
+            rows.append(dict(report_date=d,clicks=(1 if low_traffic else 12) if earlier else 10,
+                impressions=(1 if low_traffic else 120) if earlier else 100,
+                spend=1 if earlier else 30,ad_sales=(0 if low_traffic else (100 if profitable else 20)) if earlier else 100,
+                ad_orders=(0 if low_traffic else 2) if earlier else 2))
+        changes=[self.change('2026-09-01 15:00:00',1,.7),self.change('2026-09-15 15:00:00',.7,1)]
+        def context(dates):
+            return {'contribution_per_day':100 if dates[0]<'2026-09-15' and company_gain else 50}
+        return recorded_bid_assessment(self.target(),rows,changes,'2026-09-28',days,company_context=context)
+
+    def test_zero_order_traffic_collapse_cannot_win_even_with_higher_company_context(self):
+        r=self.comparison(low_traffic=True)
+        self.assertEqual(r['recommended_bid'],1)
+        self.assertEqual(r['rejected_alternatives'][0]['bid'],.7)
+        self.assertIn('traffic',r['rejected_alternatives'][0]['reason'])
+
+    def test_change_requires_company_and_direct_economics_and_preserved_delivery(self):
+        self.assertEqual(self.comparison()['recommended_bid'],.7)
+        self.assertEqual(self.comparison(company_gain=False)['recommended_bid'],1)
+        self.assertEqual(self.comparison(profitable=False)['recommended_bid'],1)
+
 if __name__=='__main__':unittest.main()

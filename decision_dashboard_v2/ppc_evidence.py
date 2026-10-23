@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from .reporting_dates import amazon_us_reporting_date
 
-MODEL_VERSION = "ppc-evidence-3"
+MODEL_VERSION = "ppc-evidence-4"
 DEFAULTS = {
     "attribution_days": 7,  # The loaded report's 7 Day attribution definition.
     "prior_lookback_days": 28,

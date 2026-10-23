@@ -194,3 +194,6 @@ and does not bypass existing scenario/approval safeguards. A newly recorded chan
 whose attribution is still pending is kept pending rather than immediately reversed
 using older comparisons. The next review accounts for that change's maturity date.
 No CPC-to-bid ratio or fixed percentage-cut rule is used. No Amazon setting is changed.
+
+### Traffic and company contribution safeguard
+Recorded bid ranking retains the latest setting with observed orders as a baseline. A different setting is recommended only when both direct contribution margin scenarios improve, matched company contribution/day improves, and observed clicks/day and impressions/day do not fall. No arbitrary traffic percentage or monetized organic lift is assumed. A traffic-reducing change requires separate controlled evidence; higher company contribution in a different period does not prove that losing keyword traffic helped. Missing company evidence prevents an alternative from winning. Retaining a baseline is not a profitability or optimality claim. Pending settings, stale windows and verified scenario workflows retain their existing restrictions.
