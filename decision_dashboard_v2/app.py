@@ -451,9 +451,9 @@ def prime_big_deals():
 @app.get("/price-change")
 def price_change():
     try:
-        window = int(request.args.get("window", "7"))
+        window = int(request.args.get("window", "14"))
     except ValueError:
-        window = 7
+        window = 14
     include_transition = request.args.get("transition", "exclude") == "include"
     baseline_mode = request.args.get("baseline", "weekday4")
     return render_template(

@@ -175,9 +175,28 @@ def price_change_performance(window=7, include_transition=False,
         exact_fees = {(row["order_id"], row["asin"]): dict(row)
                       for row in conn.execute(
             """SELECT order_id,asin,ABS(SUM(amazon_fees)) fee,
-                      MIN(CASE WHEN fee_status='exact_order_fee_allocated' THEN 1 ELSE 0 END) exact_ready
+                      MIN(CASE WHEN fee_status='exact_order_fee_allocated' AND amazon_fees IS NOT NULL THEN 1 ELSE 0 END) exact_ready
                FROM sales_profitability WHERE brand='Litet'
                GROUP BY order_id,asin"""
+        ).fetchall()}
+        # Order-level fee postings can cover replacement orders omitted from
+        # sales_profitability, but only when the order contains one ASIN.
+        order_fee_rows = {row["order_id"]: row["fee"] for row in conn.execute(
+            """WITH single_asin_orders AS (
+                 SELECT "amazon-order-id" order_id FROM orders
+                 WHERE CAST(COALESCE(NULLIF(quantity,''),'0') AS REAL)>0
+                 GROUP BY "amazon-order-id" HAVING COUNT(DISTINCT asin)=1
+               )
+               SELECT f.order_id, ABS(SUM(f.fee_amount)) fee
+               FROM fee_ledger f JOIN single_asin_orders o ON o.order_id=f.order_id
+               WHERE f.brand='Litet' AND f.is_exact=1
+               GROUP BY f.order_id"""
+        ).fetchall()}
+        zero_fee_orders = {row[0] for row in conn.execute(
+            """SELECT order_id FROM transaction_mart
+               WHERE brand='Litet' AND is_released=1
+               GROUP BY order_id
+               HAVING COUNT(*)>0 AND COUNT(amazon_fees)=COUNT(*) AND SUM(ABS(amazon_fees))=0"""
         ).fetchall()}
         cogs_rows = conn.execute(
             """SELECT asin,unit_cogs,source FROM cogs_ledger
@@ -249,9 +268,17 @@ def price_change_performance(window=7, include_transition=False,
         row["promoted"] = bool(row["item_discount"] or row["ship_discount"]
                                or row["has_promotion_id"])
         fee = exact_fees.get((row["order_id"], row["asin"]))
-        if fee and fee["exact_ready"]:
+        if fee and fee["exact_ready"] and fee["fee"] is not None:
             row["fee"] = fee["fee"]
             row["fee_method"] = "exact"
+        elif row["order_id"] in order_fee_rows:
+            row["fee"] = order_fee_rows[row["order_id"]]
+            row["fee_method"] = "exact"
+        elif row["revenue"] == 0 and row["order_id"] in zero_fee_orders:
+            # A released zero-fee posting is evidence, not a guarantee that
+            # a later fee or adjustment will never be posted.
+            row["fee"] = 0
+            row["fee_method"] = "estimated_zero"
         elif fba_rates.get(row["asin"]) is not None:
             referral, unused_rate = clothing_referral_fee(row["revenue"], row["packs"])
             row["fee"] = row["packs"] * fba_rates[row["asin"]] + referral
@@ -304,6 +331,8 @@ def price_change_performance(window=7, include_transition=False,
             "contribution_per_pack": contribution/packs if packs and len(contribution_rows) == len(selected) else None,
             "exact_fee_coverage": fee_revenue/revenue if revenue else None,
             "estimated_fee_coverage": estimated_revenue/revenue if revenue else None,
+            "estimated_zero_fee_packs": sum(weighted(row, "packs") for row in selected if row["fee_method"] == "estimated_zero"),
+            "missing_cost_packs": sum(weighted(row, "packs") for row in selected if row["contribution"] is None),
             "promoted_packs": sum(weighted(row, "packs") for row in selected if row["promoted"]),
             "statuses": statuses,
             "raw_orders": len({row["order_id"] for row in selected}),
@@ -453,16 +482,15 @@ def price_change_performance(window=7, include_transition=False,
                      key=lambda row: row["purchase_timestamp"], default=None)
     changed_with_sales = [row for row in evidence_rows if row["before"]["packs"] or row["after"]["packs"]]
     elasticity_rows = [row for row in evidence_rows if row["elasticity"] is not None]
-    conclusion = "Too early to decide"
-    if len(after_dates) >= 7 and after["contribution_per_day"] is not None:
-        conclusion = ("Contribution dollars improved" if before["contribution_per_day"] is not None
-                      and after["contribution_per_day"] > before["contribution_per_day"]
-                      else "Contribution dollars have not improved")
+    conclusion = "More evidence needed"
+    if len(after_dates) >= 7 and before["contribution_after_ads_per_day"] is not None and after["contribution_after_ads_per_day"] is not None:
+        conclusion = ("Contribution after ads is above baseline" if after["contribution_after_ads_per_day"] > before["contribution_after_ads_per_day"]
+                      else "Contribution after ads is at or below baseline")
     opportunities = [
         {
-            "title": "Complete the first seven post-change days",
+            "title": "Review the next measurement window",
             "evidence": f'{len(after_dates)} completed post-change day(s) are loaded; {after["packs"]:g} packs observed.',
-            "next": "Recheck after seven completed Pacific days before making another price decision.",
+            "next": ("Recheck after seven completed Pacific days." if len(after_dates) < 7 else "Recheck after 14 completed Pacific days." if len(after_dates) < 14 else "Compare the 28-day view and reconcile settled fees and returns."),
         },
         {
             "title": "Resolve the Black L/XL pack definition",

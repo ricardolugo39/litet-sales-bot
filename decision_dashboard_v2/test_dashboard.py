@@ -797,3 +797,31 @@ class DashboardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PriceChangeBaselineRegressionTest(unittest.TestCase):
+    def test_zero_price_and_replacement_orders_have_supported_baseline(self):
+        from decision_dashboard_v2.analytics import price_change_performance
+        with patch('decision_dashboard_v2.analytics.datetime', wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 10, 27, 12, tzinfo=ZoneInfo('America/Los_Angeles'))
+            result = price_change_performance(14, False, 'weekday4')
+        self.assertEqual(result['before']['missing_cost_packs'], 0)
+        self.assertAlmostEqual(result['before']['estimated_zero_fee_packs'], .5)
+        self.assertIsNotNone(result['before']['contribution_after_ads_per_day'])
+        self.assertAlmostEqual(result['before']['contribution_after_ads_per_day'],
+                               (result['before']['contribution'] - result['before']['ad_spend']) / result['before']['days'])
+
+    def test_missing_cost_is_not_silently_treated_as_zero(self):
+        from decision_dashboard_v2.analytics import price_change_performance
+        path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        try:
+            with sqlite3.connect(os.environ["LITET_DB_PATH"]) as source, sqlite3.connect(path) as copy:
+                source.backup(copy)
+                copy.execute("DELETE FROM cogs_ledger WHERE asin='B0DSCG3L5S'")
+            with patch.dict(os.environ, {"LITET_DB_PATH": path}), patch('decision_dashboard_v2.analytics.datetime', wraps=datetime) as clock:
+                clock.now.return_value = datetime(2026, 10, 27, 12, tzinfo=ZoneInfo('America/Los_Angeles'))
+                result = price_change_performance(14, False, 'weekday4')
+            self.assertGreater(result['before']['missing_cost_packs'], 0)
+            self.assertIsNone(result['before']['contribution_after_ads_per_day'])
+            self.assertEqual(result['conclusion'], 'More evidence needed')
+        finally:
+            os.unlink(path)
