@@ -142,6 +142,11 @@ def ensure_schema(conn):
             ON business_traffic(parent_asin, period_start, period_end);
         """
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(business_report_imports)")}
+    if "content_hash" not in columns:
+        conn.execute("ALTER TABLE business_report_imports ADD COLUMN content_hash TEXT")
+    conn.execute("UPDATE business_report_imports SET content_hash=file_hash WHERE content_hash IS NULL")
+    conn.commit()
 
 
 def parse_period(file_name):
@@ -251,44 +256,40 @@ def destination_path(file_path, folder, status):
 
 def import_file(file_path, conn, move_after=True):
     period_start, period_end, period_type = parse_period(file_path.name)
-    digest = file_hash(file_path)
-
-    already_imported = conn.execute(
-        "SELECT 1 FROM business_report_imports WHERE file_hash = ?", (digest,)
+    ensure_schema(conn)
+    content_digest = file_hash(file_path)
+    existing = conn.execute(
+        "SELECT source_file,content_hash FROM business_report_imports WHERE period_start=? AND period_end=? LIMIT 1",
+        (period_start, period_end),
     ).fetchone()
-    if already_imported:
-        print(f"Already imported; skipping: {file_path.name}")
-        if move_after:
-            shutil.move(file_path, destination_path(file_path, PROCESSED_FOLDER, "duplicate"))
-        return 0
+    if existing:
+        if existing[1] == content_digest:
+            print(f"Already imported for this period; skipping: {file_path.name}")
+            if move_after:
+                shutil.move(file_path, destination_path(file_path, PROCESSED_FOLDER, "duplicate"))
+            return 0
+        raise ValueError(f"Period {period_start} through {period_end} was already imported from {existing[0]}; no data was changed")
 
+    same_content = conn.execute(
+        "SELECT source_file,period_start,period_end FROM business_report_imports WHERE content_hash=? LIMIT 1",
+        (content_digest,),
+    ).fetchone()
+    digest = (hashlib.sha256(f"{content_digest}:{period_start}:{period_end}".encode()).hexdigest()
+              if same_content else content_digest)
+    if same_content:
+        print(f"Warning: identical content to {same_content[0]} ({same_content[1]}–{same_content[2]}); storing separately using the filename dates, which are not independently verified.")
     df, imported_at = load_and_validate(
         file_path, period_start, period_end, period_type, digest
     )
-
-    conflict = conn.execute(
-        """
-        SELECT source_file
-        FROM business_report_imports
-        WHERE period_start = ? AND period_end = ?
-        LIMIT 1
-        """,
-        (period_start, period_end),
-    ).fetchone()
-    if conflict:
-        raise ValueError(
-            f"Period {period_start} through {period_end} was already imported "
-            f"from {conflict[0]}; no data was changed"
-        )
 
     with conn:
         conn.execute(
             """
             INSERT INTO business_report_imports
-                (file_hash, source_file, period_start, period_end, period_type, row_count, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (file_hash, source_file, period_start, period_end, period_type, row_count, imported_at, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (digest, file_path.name, period_start, period_end, period_type, len(df), imported_at),
+            (digest, file_path.name, period_start, period_end, period_type, len(df), imported_at, content_digest),
         )
         df.to_sql("business_traffic", conn, if_exists="append", index=False)
         retired = retire_replaced_cross_month_reports(

@@ -509,10 +509,10 @@ def sales_tree():
     conversion = metric("Units ordered / session",bt["units_per_session"] if bt else None,at["units_per_session"] if at else None)
     traffic_diagnostic = None
     if comparison is None and (not bt or not at):
-        traffic_diagnostic = price_change_traffic_diagnostic()
+        traffic_diagnostic = result.get("alternate_traffic") or price_change_traffic_diagnostic()
         if traffic_diagnostic:
             d = traffic_diagnostic
-            traffic = metric("Sessions / day", d["before"]["sessions"]/7, d["after"]["sessions"]/7)
+            traffic = metric("Sessions / day", d["before"]["sessions"]/d.get("before_days",7), d["after"]["sessions"]/d.get("after_days",7))
             conversion = metric("Units ordered / session",d["before"]["units_per_session"],d["after"]["units_per_session"])
     clicks = metric("Ad clicks / day",per_day(before,"ad_clicks") if ad_complete else None,per_day(after,"ad_clicks") if ad_complete else None)
     cpc = metric("Cost / ad click",before["ad_spend"]/before["ad_clicks"] if ad_complete and before["ad_clicks"] else None,

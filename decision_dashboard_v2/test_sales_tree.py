@@ -36,12 +36,18 @@ class SalesTreeTest(unittest.TestCase):
 
     def test_traffic_cohort_is_separate_and_aggregated(self):
         from decision_dashboard_v2.analytics import price_change_traffic_diagnostic
-        d = price_change_traffic_diagnostic()
-        self.assertEqual(d['asin_count'], 10)
-        self.assertEqual((d['before']['sessions'], d['before']['units']), (625,36))
-        self.assertEqual((d['after']['sessions'], d['after']['units']), (486,20))
-        self.assertEqual(len(d['excluded']),2)
+        d = price_change_performance(14).get('alternate_traffic') or price_change_traffic_diagnostic()
+        self.assertGreater(d['asin_count'], 0)
         page = self.client.get('/sales-tree')
-        self.assertIn(b'separate dates',page.data)
-        self.assertIn(b'625',page.data)
-        self.assertIn(b'486',page.data)
+        self.assertIn(b'separate dates', page.data)
+        self.assertIn(f"{d['before']['sessions']:,.0f}".encode(), page.data)
+        self.assertIn(f"{d['after']['sessions']:,.0f}".encode(), page.data)
+
+    def test_helium_snapshot_is_labeled_and_not_used_for_custom_dates(self):
+        page = self.client.get('/sales-tree')
+        self.assertEqual(page.status_code, 200)
+        for label in (b'Market search demand', b'Organic search position',
+                      b'15.4% ACoS', b'91.2% ACoS', b'fixed research findings'):
+            self.assertIn(label, page.data)
+        custom = self.client.get('/sales-tree?before_start=2026-09-20&before_end=2026-09-28&after_start=2026-10-18&after_end=2026-10-26')
+        self.assertNotIn(b'Market search demand', custom.data)

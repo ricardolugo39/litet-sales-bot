@@ -92,6 +92,48 @@ def midpoint_arc_elasticity(before_quantity, after_quantity,
     return quantity_change / price_change
 
 
+def resolve_traffic_interval(rows, start, end):
+    """Resolve direct reports against cumulative snapshots without inventing missing ASINs."""
+    direct = {r['child_asin']:r for r in rows if r['period_start']==start and r['period_end']==end}
+    first, last = date.fromisoformat(start), date.fromisoformat(end)
+    snap = None
+    boundary = first - timedelta(days=1)
+    fields = ('sessions_total','units_ordered','page_views_total','ordered_product_sales')
+    if first.year == last.year and first.month == last.month:
+        month = first.replace(day=1).isoformat()
+        ending = {r['child_asin']:r for r in rows if r['period_start']==month and r['period_end']==end}
+        beginning = ({asin:{f:0 for f in fields} for asin in ending} if first.day == 1 else
+                     {r['child_asin']:r for r in rows if r['period_start']==month and r['period_end']==boundary.isoformat()})
+        if ending and set(ending)==set(beginning):
+            candidate={}
+            for asin in ending:
+                v={f:(ending[asin].get(f) or 0)-(beginning[asin].get(f) or 0) for f in fields}
+                if any(value < -1e-8 for value in v.values()):
+                    candidate = None
+                    break
+                candidate[asin]={'child_asin':asin, **v, 'featured_offer_percentage':None}
+            snap=candidate
+    discrepancy = bool(direct and snap is not None and (
+        set(direct)!=set(snap) or any(abs((direct[asin].get(k) or 0)-snap[asin][k])>0.01
+            for asin in set(direct)&set(snap) for k in ('sessions_total','units_ordered'))))
+    if snap is not None and (not direct or discrepancy):
+        chosen, method = snap, 'snapshot difference'
+    elif direct:
+        chosen, method = direct, 'direct report'
+    elif snap is not None:
+        chosen, method = snap, 'snapshot difference'
+    else:
+        return None
+    sessions=sum(r['sessions_total'] for r in chosen.values())
+    units=sum(r['units_ordered'] for r in chosen.values())
+    return {'rows':chosen,'sessions':sessions,'units':units,'units_per_session':units/sessions if sessions else None,
+            'source':method,'start_snapshot':boundary.isoformat(),'end_snapshot':end,
+            'discrepancy':discrepancy,'direct_sessions':sum(x['sessions_total'] for x in direct.values()) if direct else None,
+            'direct_units':sum(x['units_ordered'] for x in direct.values()) if direct else None,
+            'direct_missing_asins':sorted(set(snap)-set(direct)) if direct and snap is not None else [],
+            'coverage_unverified': method == 'direct report' and snap is None}
+
+
 def price_change_performance(window=7, include_transition=False,
                              baseline_mode="weekday4", comparison=None):
     """Describe the October 17 Litet price change without claiming causality.
@@ -227,6 +269,13 @@ def price_change_performance(window=7, include_transition=False,
                GROUP BY e.asin"""
         ).fetchall()}
 
+        content_columns = {row[1] for row in conn.execute("PRAGMA table_info(business_report_imports)")}
+        identical_periods = set()
+        if 'content_hash' in content_columns:
+            identical_periods = {(r[0],r[1]) for r in conn.execute("""SELECT a.period_start,a.period_end
+                FROM business_report_imports a JOIN business_report_imports b
+                  ON a.content_hash=b.content_hash AND a.file_hash<>b.file_hash
+                WHERE a.content_hash IS NOT NULL""")}
         historical_cogs = [dict(row) for row in conn.execute(
             "SELECT asin,unit_cogs,effective_start,effective_end FROM cogs_ledger ORDER BY effective_start DESC"
         ).fetchall()] if comparison is not None else []
@@ -257,7 +306,9 @@ def price_change_performance(window=7, include_transition=False,
         ).fetchone()
         traffic_rows = [dict(row) for row in conn.execute(
             """SELECT b.period_start,b.period_end,b.child_asin,
-                      MAX(b.sessions_total) sessions_total,SUM(b.units_ordered) units_ordered
+                      MAX(b.sessions_total) sessions_total,SUM(b.units_ordered) units_ordered,
+                      MAX(b.page_views_total) page_views_total,SUM(b.ordered_product_sales) ordered_product_sales,
+                      MAX(b.featured_offer_percentage) featured_offer_percentage
                FROM business_traffic b JOIN dim_product p ON p.asin=b.child_asin AND p.is_current=1
                WHERE p.canonical_brand='Litet'
                GROUP BY b.period_start,b.period_end,b.child_asin"""
@@ -377,43 +428,27 @@ def price_change_performance(window=7, include_transition=False,
                            for index in range(1, len(days))):
             return None
         start, end = days[0], days[-1]
-        direct = [row for row in traffic_rows if row["period_start"] == start.isoformat()
-                  and row["period_end"] == end.isoformat()]
-        if direct:
-            sessions = sum(row["sessions_total"] for row in direct)
-            units = sum(row["units_ordered"] for row in direct)
-            return {"sessions":sessions,"units":units,
-                    "units_per_session":units/sessions if sessions else None,
-                    "source":"direct report","start_snapshot":None,"end_snapshot":end.isoformat()}
-        if start.month != end.month or start.year != end.year:
-            return None
-        period_start = start.replace(day=1).isoformat()
-        end_rows = {row["child_asin"]: row for row in traffic_rows
-                    if row["period_start"] == period_start
-                    and row["period_end"] == end.isoformat()}
-        boundary = start - timedelta(days=1)
-        if boundary < start.replace(day=1):
-            start_rows = {asin: {"sessions_total": 0, "units_ordered": 0}
-                          for asin in end_rows}
-        else:
-            start_rows = {row["child_asin"]: row for row in traffic_rows
-                          if row["period_start"] == period_start
-                          and row["period_end"] == boundary.isoformat()}
-        if not end_rows or set(end_rows) != set(start_rows):
-            return None
-        sessions = sum(end_rows[asin]["sessions_total"]-start_rows[asin]["sessions_total"]
-                       for asin in end_rows)
-        units = sum(end_rows[asin]["units_ordered"]-start_rows[asin]["units_ordered"]
-                    for asin in end_rows)
-        if sessions < 0 or units < 0:
-            return None
-        return {"sessions": sessions, "units": units,
-                "units_per_session": units/sessions if sessions else None,
-                "source": "snapshot difference", "start_snapshot": boundary.isoformat(), "end_snapshot": end.isoformat()}
+        resolved = resolve_traffic_interval(traffic_rows, start.isoformat(), end.isoformat())
+        if resolved:
+            boundary=(start-timedelta(days=1)).isoformat()
+            month=start.replace(day=1).isoformat()
+            resolved['date_unverified'] = (month,boundary) in identical_periods or (start.isoformat(),end.isoformat()) in identical_periods
+        return resolved
 
     before["traffic"] = (traffic_interval(before_dates)
                          if baseline_mode == "equal" or comparison is not None else None)
     after["traffic"] = traffic_interval(after_dates)
+    alternate_traffic = None
+    if comparison is None and after_dates and after_dates[0] == date(2026,10,18) and after["traffic"]:
+        prior_days = [date(2026,10,1)+timedelta(days=i) for i in range(16)]
+        alt_before = traffic_interval(prior_days)
+        if alt_before:
+            alternate_traffic = {"before":alt_before,"after":after["traffic"],
+                                 "before_days":16,"after_days":len(after_dates),
+                                 "before_dates":"October 1–16", "after_dates":f"October 18–{after_dates[-1].day}",
+                                 "asin_count":len(after["traffic"]["rows"]),
+                                 "excluded":after["traffic"]["direct_missing_asins"],
+                                 "method":"full"}
     ppc_by_day = {date.fromisoformat(row["sale_day"]): row for row in ppc_rows}
     for result, weights in ((before, before_date_weights), (after, after_date_weights)):
         result["ad_spend"] = sum(((ppc_by_day.get(day) or {}).get("spend") or 0) * weight
@@ -564,6 +599,7 @@ def price_change_performance(window=7, include_transition=False,
         ],
         "after_dates": [day.isoformat() for day in after_dates],
         "before": before, "after": after, "conclusion": conclusion,
+        "alternate_traffic": alternate_traffic,
         "asin_rows": asin_rows, "pack_rows": pack_rows, "variant_rows": variant_rows,
         "six_pack": six_pack,
         "daily": daily, "earliest_new": earliest_new, "latest_old": latest_old,
@@ -1019,6 +1055,34 @@ def _select_nonoverlapping_traffic(conn, period_start, period_end, *, within_mon
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS selected_traffic_periods (period_start TEXT,period_end TEXT, PRIMARY KEY(period_start,period_end))")
     conn.execute("DELETE FROM selected_traffic_periods")
     conn.executemany("INSERT INTO selected_traffic_periods VALUES (?,?)", selected)
+    conn.execute("""CREATE TEMP TABLE IF NOT EXISTS selected_traffic_values (
+        period_start TEXT, period_end TEXT, child_asin TEXT,
+        sessions_total REAL, units_ordered REAL, page_views_total REAL,
+        ordered_product_sales REAL, featured_offer_percentage REAL)""")
+    conn.execute("DELETE FROM selected_traffic_values")
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS selected_traffic_status (period_start TEXT, period_end TEXT, brand TEXT, source TEXT, discrepancy INTEGER, coverage_unverified INTEGER)")
+    conn.execute("DELETE FROM selected_traffic_status")
+    if selected and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dim_product'").fetchone():
+        grouped = [dict(r) for r in conn.execute("""SELECT b.period_start,b.period_end,b.child_asin,p.canonical_brand,
+                MAX(b.sessions_total) sessions_total,SUM(b.units_ordered) units_ordered,
+                MAX(b.page_views_total) page_views_total,SUM(b.ordered_product_sales) ordered_product_sales,
+                MAX(b.featured_offer_percentage) featured_offer_percentage
+              FROM business_traffic b JOIN dim_product p ON p.asin=b.child_asin AND p.is_current=1
+              GROUP BY b.period_start,b.period_end,b.child_asin,p.canonical_brand""")]
+        brands = {r['canonical_brand'] for r in grouped}
+        values=[]
+        statuses=[]
+        for start,end in selected:
+            for brand in brands:
+                resolved = resolve_traffic_interval([r for r in grouped if r['canonical_brand']==brand],start,end)
+                if not resolved:
+                    continue
+                statuses.append((start,end,brand,resolved['source'],int(resolved['discrepancy']),int(resolved['coverage_unverified'])))
+                for asin,row in resolved['rows'].items():
+                    values.append((start,end,asin,row['sessions_total'],row['units_ordered'],
+                                   row.get('page_views_total'),row.get('ordered_product_sales'),row.get('featured_offer_percentage')))
+        conn.executemany("INSERT INTO selected_traffic_values VALUES (?,?,?,?,?,?,?,?)", values)
+        conn.executemany("INSERT INTO selected_traffic_status VALUES (?,?,?,?,?,?)", statuses)
     return selected
 
 
@@ -1035,8 +1099,7 @@ def overview(period_start, period_end, brand):
                      SUM(units_ordered) AS units,
                      SUM(ordered_product_sales) AS ordered_sales,
                      MAX(featured_offer_percentage) AS buy_box
-              FROM business_traffic t
-              JOIN selected_traffic_periods latest USING (period_start,period_end)
+              FROM selected_traffic_values t
               GROUP BY period_start, period_end, child_asin
             ), asin_traffic AS (
               SELECT asin, SUM(sessions) sessions, SUM(page_views) page_views,
@@ -1054,6 +1117,9 @@ def overview(period_start, period_end, brand):
             """,
             [*params],
         ).fetchone()
+        traffic_warnings = [dict(r) for r in conn.execute(
+            "SELECT * FROM selected_traffic_status WHERE (discrepancy=1 OR coverage_unverified=1) AND (?='All' OR brand=?)",
+            (brand,brand))]
         economics = conn.execute(
             f"""
             WITH latest_economics_periods AS (
@@ -1084,7 +1150,7 @@ def overview(period_start, period_end, brand):
             """,
             [period_start, period_end, *params],
         ).fetchone()
-    result = {**dict(traffic), **dict(economics)}
+    result = {**dict(traffic), **dict(economics), "traffic_warnings": traffic_warnings}
     result["tacos"] = result["ad_spend"] / result["ordered_sales"] if result["ordered_sales"] else None
     result["contribution_after_cogs"] = result["net_proceeds"] - result["estimated_cogs"]
     result["contribution_margin"] = result["contribution_after_cogs"] / result["net_sales"] if result["net_sales"] else None
@@ -1149,7 +1215,7 @@ def cost_diagnosis(period_start, period_end, brand):
         ordered = conn.execute(
             f"""WITH asin_sales AS (
                   SELECT child_asin asin, SUM(ordered_product_sales) ordered_sales
-                  FROM business_traffic JOIN selected_traffic_periods USING (period_start,period_end) GROUP BY child_asin
+                  FROM selected_traffic_values GROUP BY child_asin
                 )
                 SELECT COALESCE(SUM(a.ordered_sales),0) ordered_sales
                 FROM asin_sales a JOIN dim_product tp ON tp.asin=a.asin
@@ -1241,10 +1307,7 @@ def monthly_trend(brand):
             ), period_traffic AS (
               SELECT t.period_start, t.period_end, t.child_asin,
                      MAX(t.sessions_total) sessions
-              FROM business_traffic t
-              JOIN selected_traffic_periods selected
-                ON selected.period_start=t.period_start
-               AND selected.period_end=t.period_end
+              FROM selected_traffic_values t
               GROUP BY t.period_start, t.period_end, t.child_asin
             ), traffic AS (
               SELECT substr(t.period_start,1,7) month, SUM(t.sessions) sessions
@@ -1349,8 +1412,7 @@ def product_diagnostics(period_start, period_end, brand):
               SELECT period_start,period_end,child_asin asin, MAX(sessions_total) sessions,
                      SUM(units_ordered) units, SUM(ordered_product_sales) ordered_sales,
                      MAX(featured_offer_percentage) buy_box
-              FROM business_traffic t
-              JOIN selected_traffic_periods latest USING (period_start,period_end)
+              FROM selected_traffic_values t
               GROUP BY period_start,period_end,child_asin
             ), traffic AS (
               SELECT asin,SUM(sessions) sessions,SUM(units) units,SUM(ordered_sales) ordered_sales,AVG(buy_box) buy_box

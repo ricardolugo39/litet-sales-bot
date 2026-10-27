@@ -26,12 +26,20 @@ class SelectionTest(unittest.TestCase):
             ('2026-10-01','2026-10-10'),('2026-10-05','2026-10-20'),('2026-10-11','2026-10-26')])
         self.assertEqual(self.choose('2026-10-01','2026-10-26'),(('2026-10-01','2026-10-10'),('2026-10-11','2026-10-26')))
 
+def clear_test_periods(path):
+    """Remove only the reports these tests create from their disposable copy."""
+    with sqlite3.connect(path) as conn:
+        where = "(period_start='2026-10-01' AND period_end='2026-10-17') OR (period_start='2026-10-18' AND period_end='2026-10-26')"
+        conn.execute('DELETE FROM business_traffic WHERE ' + where)
+        conn.execute('DELETE FROM business_report_imports WHERE ' + where)
+
 class DashboardOverlapTest(unittest.TestCase):
     def test_direct_export_does_not_inflate_existing_views(self):
         path=tempfile.NamedTemporaryFile(suffix='.db',delete=False).name
         try:
             with sqlite3.connect(os.environ['LITET_DB_PATH']) as source, sqlite3.connect(path) as copy:
                 source.backup(copy)
+            clear_test_periods(path)
             with patch.dict(os.environ,{'LITET_DB_PATH':path}):
                 original=overview('2026-10-01','2026-10-26','Litet')
                 products=product_diagnostics('2026-10-01','2026-10-26','Litet')
@@ -67,6 +75,7 @@ class ImportOverlapTest(unittest.TestCase):
             db_path = os.path.join(directory, 'copy.db')
             with sqlite3.connect(os.environ['LITET_DB_PATH']) as source, sqlite3.connect(db_path) as target:
                 source.backup(target)
+            clear_test_periods(db_path)
             frame = pd.read_csv(source_path, dtype=str)
             with patch.dict(os.environ, {'LITET_DB_PATH':db_path}):
                 before=overview('2026-10-01','2026-10-26','Litet')
@@ -96,3 +105,33 @@ class ImportOverlapTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'Business report import failed'):
                     importer.update_business_reports()
                 self.assertEqual(len(list((root/'failed').glob('*.csv'))),1)
+
+    def test_real_duplicate_and_omitted_asins_are_flagged(self):
+        from pathlib import Path
+        from datetime import date
+        from pipelines.importers.update_business_reports import import_file
+        source='/Users/ricardolugo/Library/CloudStorage/OneDrive-Personal/Hasten/Reports/Raw/incoming'
+        with tempfile.TemporaryDirectory() as directory:
+            db_path=os.path.join(directory,'copy.db')
+            with sqlite3.connect(os.environ['LITET_DB_PATH']) as db, sqlite3.connect(db_path) as copy:
+                db.backup(copy)
+            clear_test_periods(db_path)
+            with sqlite3.connect(db_path) as conn:
+                f1=Path(source)/'business_report_2026-10-01_2026-10-17.csv'
+                f2=Path(source)/'business_report_2026-10-18_2026-10-26.csv'
+                self.assertGreater(import_file(f1,conn,move_after=False),0)
+                self.assertGreater(import_file(f2,conn,move_after=False),0)
+                self.assertEqual(import_file(f1,conn,move_after=False),0)
+                hashes=conn.execute("SELECT count(DISTINCT content_hash), count(DISTINCT file_hash) FROM business_report_imports WHERE period_start='2026-10-01' AND period_end IN ('2026-10-17','2026-10-18')").fetchone()
+                self.assertEqual(hashes,(1,2))
+            with patch.dict(os.environ, {'LITET_DB_PATH':db_path}):
+                r=price_change_performance(14,comparison=(date(2026,10,1),date(2026,10,16),date(2026,10,18),date(2026,10,26)))
+                traffic=r['after']['traffic']
+                self.assertEqual((traffic['sessions'],traffic['units']),(606,29))
+                self.assertEqual((traffic['direct_sessions'],traffic['direct_units']),(357,30))
+                self.assertEqual(len(traffic['direct_missing_asins']),2)
+                self.assertTrue(traffic['date_unverified'])
+                self.assertEqual(traffic['source'],'snapshot difference')
+                m=overview('2026-10-18','2026-10-26','Litet')
+                self.assertEqual((m['sessions'],m['units']),(606,29))
+                self.assertTrue(m['traffic_warnings'])
