@@ -93,7 +93,7 @@ def midpoint_arc_elasticity(before_quantity, after_quantity,
 
 
 def price_change_performance(window=7, include_transition=False,
-                             baseline_mode="weekday4"):
+                             baseline_mode="weekday4", comparison=None):
     """Describe the October 17 Litet price change without claiming causality.
 
     The default comparison excludes the transition day, uses completed Pacific
@@ -150,6 +150,13 @@ def price_change_performance(window=7, include_transition=False,
                 matches = [day for day in baseline_pool if day.weekday() == weekday]
                 for day in matches:
                     before_date_weights[day] = exposure / len(matches)
+        if comparison is not None:
+            before_start, before_end, custom_start, custom_end = comparison
+            before_date_weights = {before_start + timedelta(days=i): 1.0
+                                   for i in range((before_end-before_start).days + 1)}
+            after_dates = [custom_start + timedelta(days=i)
+                           for i in range((custom_end-custom_start).days + 1)]
+            after_date_weights = {day: 1.0 for day in after_dates}
         before_dates = sorted(before_date_weights)
 
         order_rows = [dict(row) for row in conn.execute(
@@ -220,9 +227,20 @@ def price_change_performance(window=7, include_transition=False,
                GROUP BY e.asin"""
         ).fetchall()}
 
+        historical_cogs = [dict(row) for row in conn.execute(
+            "SELECT asin,unit_cogs,effective_start,effective_end FROM cogs_ledger ORDER BY effective_start DESC"
+        ).fetchall()] if comparison is not None else []
+        historical_fba = [dict(row) for row in conn.execute(
+            """SELECT asin,period_start,period_end,
+                      ABS(SUM(fba_fulfillment_fees))/NULLIF(SUM(net_units_sold),0) rate
+               FROM asin_economics
+               WHERE period_start LIKE '%-01'
+                 AND period_end=date(period_start,'+1 month','-1 day')
+               GROUP BY asin,period_start,period_end ORDER BY period_end DESC"""
+        ).fetchall()] if comparison is not None else []
         ppc_rows = [dict(row) for row in conn.execute(
             """SELECT report_date sale_day,SUM(spend) spend,SUM(ad_sales) ad_sales,
-                      SUM(ad_orders) ad_orders
+                      SUM(clicks) clicks, SUM(ad_orders) ad_orders
                FROM ppc_fact_clean
                WHERE brand='Litet' AND lower(campaign_name) LIKE '%litet%'
                GROUP BY report_date"""
@@ -238,9 +256,11 @@ def price_change_performance(window=7, include_transition=False,
                WHERE p.canonical_brand='Litet' AND b.period_start='2026-10-01'"""
         ).fetchone()
         traffic_rows = [dict(row) for row in conn.execute(
-            """SELECT period_start,period_end,child_asin,sessions_total,units_ordered
-               FROM business_traffic b JOIN dim_product p ON p.asin=b.child_asin
-               WHERE p.canonical_brand='Litet'"""
+            """SELECT b.period_start,b.period_end,b.child_asin,
+                      MAX(b.sessions_total) sessions_total,SUM(b.units_ordered) units_ordered
+               FROM business_traffic b JOIN dim_product p ON p.asin=b.child_asin AND p.is_current=1
+               WHERE p.canonical_brand='Litet'
+               GROUP BY b.period_start,b.period_end,b.child_asin"""
         ).fetchall()]
         refund_cutoff = conn.execute(
             """SELECT MAX(period_end) FROM asin_economics e
@@ -267,6 +287,17 @@ def price_change_performance(window=7, include_transition=False,
         row["pairs"] = row["packs"] * product["units_per_sellable_unit"]
         row["promoted"] = bool(row["item_discount"] or row["ship_discount"]
                                or row["has_promotion_id"])
+        if comparison is not None:
+            cogs_match = next((x for x in historical_cogs if x["asin"] == row["asin"]
+                               and x["effective_start"] <= row["sale_day"]
+                               and (not x["effective_end"] or x["effective_end"] > row["sale_day"])), None)
+            fba_match = next((x for x in historical_fba if x["asin"] == row["asin"]
+                              and x["period_end"] < row["sale_day"] and x["rate"] is not None), None)
+            unit_cogs = cogs_match["unit_cogs"] if cogs_match else None
+            fba_rate = fba_match["rate"] if fba_match else None
+        else:
+            unit_cogs = cogs.get(row["asin"])
+            fba_rate = fba_rates.get(row["asin"])
         fee = exact_fees.get((row["order_id"], row["asin"]))
         if fee and fee["exact_ready"] and fee["fee"] is not None:
             row["fee"] = fee["fee"]
@@ -279,15 +310,14 @@ def price_change_performance(window=7, include_transition=False,
             # a later fee or adjustment will never be posted.
             row["fee"] = 0
             row["fee_method"] = "estimated_zero"
-        elif fba_rates.get(row["asin"]) is not None:
+        elif fba_rate is not None:
             referral, unused_rate = clothing_referral_fee(row["revenue"], row["packs"])
-            row["fee"] = row["packs"] * fba_rates[row["asin"]] + referral
+            row["fee"] = row["packs"] * fba_rate + referral
             row["fee_method"] = "estimated"
         else:
             row["fee"] = None
             row["fee_method"] = "missing"
-        row["cogs"] = (row["packs"] * cogs[row["asin"]]
-                       if row["asin"] in cogs else None)
+        row["cogs"] = row["packs"] * unit_cogs if unit_cogs is not None else None
         row["contribution"] = (row["revenue"]-row["cogs"]-row["fee"]
                                if row["cogs"] is not None and row["fee"] is not None
                                else None)
@@ -347,6 +377,14 @@ def price_change_performance(window=7, include_transition=False,
                            for index in range(1, len(days))):
             return None
         start, end = days[0], days[-1]
+        direct = [row for row in traffic_rows if row["period_start"] == start.isoformat()
+                  and row["period_end"] == end.isoformat()]
+        if direct:
+            sessions = sum(row["sessions_total"] for row in direct)
+            units = sum(row["units_ordered"] for row in direct)
+            return {"sessions":sessions,"units":units,
+                    "units_per_session":units/sessions if sessions else None,
+                    "source":"direct report","start_snapshot":None,"end_snapshot":end.isoformat()}
         if start.month != end.month or start.year != end.year:
             return None
         period_start = start.replace(day=1).isoformat()
@@ -371,14 +409,18 @@ def price_change_performance(window=7, include_transition=False,
             return None
         return {"sessions": sessions, "units": units,
                 "units_per_session": units/sessions if sessions else None,
-                "start_snapshot": boundary.isoformat(), "end_snapshot": end.isoformat()}
+                "source": "snapshot difference", "start_snapshot": boundary.isoformat(), "end_snapshot": end.isoformat()}
 
     before["traffic"] = (traffic_interval(before_dates)
-                         if baseline_mode == "equal" else None)
+                         if baseline_mode == "equal" or comparison is not None else None)
     after["traffic"] = traffic_interval(after_dates)
     ppc_by_day = {date.fromisoformat(row["sale_day"]): row for row in ppc_rows}
     for result, weights in ((before, before_date_weights), (after, after_date_weights)):
         result["ad_spend"] = sum(((ppc_by_day.get(day) or {}).get("spend") or 0) * weight
+                                 for day, weight in weights.items())
+        result["ad_clicks"] = sum(((ppc_by_day.get(day) or {}).get("clicks") or 0) * weight
+                                  for day, weight in weights.items())
+        result["ad_sales"] = sum(((ppc_by_day.get(day) or {}).get("ad_sales") or 0) * weight
                                  for day, weight in weights.items())
         result["contribution_after_ads"] = (result["contribution"]-result["ad_spend"]
                                             if result["contribution"] is not None else None)
@@ -534,6 +576,43 @@ def price_change_performance(window=7, include_transition=False,
         "refund_note": "Refunds are settlement-posted, not order-cohort matched; they are excluded from this early contribution comparison.",
         "mix_warning": "Aggregate pack/color/size elasticity is suppressed because simultaneous price changes and changing composition confound the coefficient.",
     }
+
+
+def price_change_traffic_diagnostic():
+    """Compare compatible October snapshots for the common ASIN cohort.
+
+    This is a separately dated diagnostic, never a substitute for the main
+    weekday-matched financial window. A missing ASIN is not assumed to be zero.
+    """
+    days = ("2026-10-07", "2026-10-14", "2026-10-19", "2026-10-26")
+    with connect() as conn:
+        rows = conn.execute("""SELECT b.period_end,b.child_asin,
+                    MAX(b.sessions_total) sessions,SUM(b.units_ordered) units
+                 FROM business_traffic b JOIN dim_product p
+                   ON p.asin=b.child_asin AND p.is_current=1
+                 WHERE p.canonical_brand='Litet' AND b.period_start='2026-10-01'
+                   AND b.period_end IN (?,?,?,?)
+                 GROUP BY b.period_end,b.child_asin""", days).fetchall()
+    snapshots = {day:{} for day in days}
+    for row in rows:
+        snapshots[row['period_end']][row['child_asin']] = (row['sessions'],row['units'])
+    common = set.intersection(*(set(snapshots[day]) for day in days))
+    if not common:
+        return None
+    def interval(start, end):
+        deltas = [(snapshots[end][asin][0]-snapshots[start][asin][0],
+                   snapshots[end][asin][1]-snapshots[start][asin][1]) for asin in common]
+        if any(sessions < 0 or units < 0 for sessions,units in deltas):
+            return None
+        sessions, units = sum(x[0] for x in deltas), sum(x[1] for x in deltas)
+        return {"sessions":sessions, "units":units,
+                "units_per_session":units/sessions if sessions else None}
+    before, after = interval(days[0],days[1]), interval(days[2],days[3])
+    if not before or not after:
+        return None
+    return {"before":before,"after":after,"asin_count":len(common),
+            "excluded":sorted(set(snapshots[days[3]])-common),
+            "before_dates":"October 8–14", "after_dates":"October 20–26"}
 
 
 def prime_big_deals_performance():
@@ -913,17 +992,43 @@ def _brand_clause(alias, brand):
     return f"{alias}.canonical_brand = ?", [brand]
 
 
+def _select_nonoverlapping_traffic(conn, period_start, period_end, *, within_month=False):
+    """Select reports with maximum covered calendar days, without overlap.
+
+    Prefer fewer reports on a tie, so a complete snapshot wins over overlapping
+    partial exports. Never prorate an aggregate or add intersecting periods.
+    A temporary table keeps this selection local to this read connection.
+    """
+    rows = conn.execute("""SELECT DISTINCT period_start,period_end FROM business_traffic
+                         WHERE period_start>=? AND period_end<=?
+                         ORDER BY period_end,period_start""",(period_start,period_end)).fetchall()
+    ranges = [(date.fromisoformat(r[0]),date.fromisoformat(r[1])) for r in rows
+              if not within_month or r[0][:7] == r[1][:7]]
+    # Each DP state is (covered days, negative report count, chosen intervals).
+    states = [(0,0,())]
+    for i,(start,end) in enumerate(ranges):
+        previous = i - 1
+        while previous >= 0 and ranges[previous][1] >= start:
+            previous -= 1
+        prior = states[previous+1]
+        include = (prior[0] + (end-start).days+1, prior[1]-1,
+                   prior[2] + ((start.isoformat(),end.isoformat()),))
+        exclude = states[-1]
+        states.append(include if include[:2] > exclude[:2] else exclude)
+    selected = states[-1][2]
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS selected_traffic_periods (period_start TEXT,period_end TEXT, PRIMARY KEY(period_start,period_end))")
+    conn.execute("DELETE FROM selected_traffic_periods")
+    conn.executemany("INSERT INTO selected_traffic_periods VALUES (?,?)", selected)
+    return selected
+
+
 def overview(period_start, period_end, brand):
     where, params = _brand_clause("p", brand)
     with connect() as conn:
+        _select_nonoverlapping_traffic(conn, period_start, period_end)
         traffic = conn.execute(
             f"""
-            WITH latest_traffic_periods AS (
-              SELECT period_start, MAX(period_end) AS period_end
-              FROM business_traffic
-              WHERE period_start>=? AND period_end<=?
-              GROUP BY period_start
-            ), period_asin_traffic AS (
+            WITH period_asin_traffic AS (
               SELECT period_start, period_end, child_asin AS asin,
                      MAX(sessions_total) AS sessions,
                      MAX(page_views_total) AS page_views,
@@ -931,7 +1036,7 @@ def overview(period_start, period_end, brand):
                      SUM(ordered_product_sales) AS ordered_sales,
                      MAX(featured_offer_percentage) AS buy_box
               FROM business_traffic t
-              JOIN latest_traffic_periods latest USING (period_start,period_end)
+              JOIN selected_traffic_periods latest USING (period_start,period_end)
               GROUP BY period_start, period_end, child_asin
             ), asin_traffic AS (
               SELECT asin, SUM(sessions) sessions, SUM(page_views) page_views,
@@ -947,7 +1052,7 @@ def overview(period_start, period_end, brand):
             FROM asin_traffic a JOIN dim_product p ON p.asin=a.asin
             WHERE {where}
             """,
-            [period_start, period_end, *params],
+            [*params],
         ).fetchone()
         economics = conn.execute(
             f"""
@@ -1040,15 +1145,16 @@ def cost_diagnosis(period_start, period_end, brand):
             [period_start, period_end, *params],
         ).fetchone()
         traffic_where, traffic_params = _brand_clause("tp", brand)
+        _select_nonoverlapping_traffic(conn, period_start, period_end)
         ordered = conn.execute(
             f"""WITH asin_sales AS (
                   SELECT child_asin asin, SUM(ordered_product_sales) ordered_sales
-                  FROM business_traffic WHERE period_start>=? AND period_end<=? GROUP BY child_asin
+                  FROM business_traffic JOIN selected_traffic_periods USING (period_start,period_end) GROUP BY child_asin
                 )
                 SELECT COALESCE(SUM(a.ordered_sales),0) ordered_sales
                 FROM asin_sales a JOIN dim_product tp ON tp.asin=a.asin
                 WHERE {traffic_where}""",
-            [period_start, period_end, *traffic_params],
+            [*traffic_params],
         ).fetchone()["ordered_sales"]
     data=dict(row); sales=data["net_sales"]; data["ordered_sales"]=ordered
     data["amazon_ex_ads"]=data["fulfillment"]+data["referral"]+data["refund_admin"]+data["other"]
@@ -1098,6 +1204,14 @@ def monthly_trend(brand):
     ppc_where = "1=1" if brand == "All" else "brand=?"
     ppc_params = [] if brand == "All" else [brand]
     with connect() as conn:
+        latest_row = conn.execute("""SELECT MIN(
+            (SELECT MAX(amazon_us_date("purchase-date")) FROM orders),
+            (SELECT MAX(date(report_date)) FROM ppc_fact_clean))""").fetchone()
+        latest_day = latest_row[0]
+        if latest_day:
+            _select_nonoverlapping_traffic(conn, latest_day[:4] + "-01-01", latest_day, within_month=True)
+        else:
+            _select_nonoverlapping_traffic(conn, "0001-01-01", "0001-01-01", within_month=True)
         rows = conn.execute(
             f"""
             WITH latest AS (
@@ -1124,17 +1238,11 @@ def monthly_trend(brand):
                 AND substr(report_date,1,4) = substr(latest.max_date,1,4)
                 AND {ppc_where}
               GROUP BY substr(report_date,1,7)
-            ), latest_traffic_periods AS (
-              SELECT period_start, MAX(period_end) period_end
-              FROM business_traffic, latest
-              WHERE date(period_end) <= latest.max_date
-                AND substr(period_start,1,4) = substr(latest.max_date,1,4)
-              GROUP BY period_start
             ), period_traffic AS (
               SELECT t.period_start, t.period_end, t.child_asin,
                      MAX(t.sessions_total) sessions
               FROM business_traffic t
-              JOIN latest_traffic_periods selected
+              JOIN selected_traffic_periods selected
                 ON selected.period_start=t.period_start
                AND selected.period_end=t.period_end
               GROUP BY t.period_start, t.period_end, t.child_asin
@@ -1234,19 +1342,15 @@ def ppc_coverage(period_start, period_end, brand):
 def product_diagnostics(period_start, period_end, brand):
     where, params = _brand_clause("p", brand)
     with connect() as conn:
+        _select_nonoverlapping_traffic(conn, period_start, period_end)
         rows = conn.execute(
             f"""
-            WITH latest_traffic_periods AS (
-              SELECT period_start, MAX(period_end) AS period_end
-              FROM business_traffic
-              WHERE period_start>=? AND period_end<=?
-              GROUP BY period_start
-            ), period_traffic AS (
+            WITH period_traffic AS (
               SELECT period_start,period_end,child_asin asin, MAX(sessions_total) sessions,
                      SUM(units_ordered) units, SUM(ordered_product_sales) ordered_sales,
                      MAX(featured_offer_percentage) buy_box
               FROM business_traffic t
-              JOIN latest_traffic_periods latest USING (period_start,period_end)
+              JOIN selected_traffic_periods latest USING (period_start,period_end)
               GROUP BY period_start,period_end,child_asin
             ), traffic AS (
               SELECT asin,SUM(sessions) sessions,SUM(units) units,SUM(ordered_sales) ordered_sales,AVG(buy_box) buy_box
@@ -1288,7 +1392,7 @@ def product_diagnostics(period_start, period_end, brand):
             WHERE p.is_current=1 AND {where}
             ORDER BY t.units DESC, t.sessions DESC
             """,
-            [period_start, period_end, period_start, period_end, *params],
+            [period_start, period_end, *params],
         ).fetchall()
     data = [dict(row) for row in rows]
     conversions = sorted(row["conversion"] for row in data if row["conversion"] is not None)
@@ -1458,7 +1562,7 @@ def product_portfolio(period_start, period_end, brand):
 def previous_period(period_start):
     with connect() as conn:
         row = conn.execute(
-            "SELECT period_start, period_end FROM business_traffic WHERE period_end < ? GROUP BY period_start, period_end ORDER BY period_end DESC LIMIT 1",
+            "SELECT period_start, period_end FROM business_traffic WHERE period_end < ? GROUP BY period_start, period_end ORDER BY period_end DESC, period_start ASC LIMIT 1",
             (period_start,),
         ).fetchone()
     return dict(row) if row else None

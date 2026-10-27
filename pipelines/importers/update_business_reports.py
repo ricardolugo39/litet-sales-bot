@@ -320,6 +320,7 @@ def update_business_reports(file_path=None, move_after=True):
         return
 
     conn = sqlite3.connect(DB_PATH)
+    failures = []
     try:
         ensure_schema(conn)
         for candidate in candidates:
@@ -327,12 +328,15 @@ def update_business_reports(file_path=None, move_after=True):
                 import_file(candidate, conn, move_after=move_after)
             except Exception as exc:
                 print(f"Error in {candidate.name}: {exc}")
+                failures.append(candidate.name)
                 if move_after and candidate.exists() and candidate.parent == INCOMING_FOLDER:
                     target = destination_path(candidate, FAILED_FOLDER, "failed")
                     shutil.move(candidate, target)
                     print(f"Moved file to: {target}")
     finally:
         conn.close()
+    if failures:
+        raise RuntimeError("Business report import failed: " + ", ".join(failures))
 
 
 if __name__ == "__main__":

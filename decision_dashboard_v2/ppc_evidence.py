@@ -202,7 +202,7 @@ def company_evidence(conn, brand, start, end, allowed_dates=None):
         month_start = start[:7] + "-01"
         boundary = (date.fromisoformat(start) - timedelta(days=1)).isoformat()
         def snapshot(day):
-            return {r["child_asin"]: dict(r) for r in conn.execute(f"SELECT b.child_asin,b.sessions_total,b.units_ordered FROM business_traffic b JOIN dim_product p ON p.asin=b.child_asin AND p.is_current=1 WHERE {clause} AND b.period_start=? AND b.period_end=?", [*args, month_start, day])}
+            return {r["child_asin"]: dict(r) for r in conn.execute(f"SELECT b.child_asin,MAX(b.sessions_total) sessions_total,SUM(b.units_ordered) units_ordered FROM business_traffic b JOIN dim_product p ON p.asin=b.child_asin AND p.is_current=1 WHERE {clause} AND b.period_start=? AND b.period_end=? GROUP BY b.child_asin", [*args, month_start, day])}
         ending = snapshot(end)
         beginning = {a: {"sessions_total": 0, "units_ordered": 0} for a in ending} if start == month_start else snapshot(boundary)
         if ending and set(ending) == set(beginning):

@@ -22,14 +22,14 @@ else:
 if __package__:
     from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                             market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                            ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, price_change_performance, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
+                            ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, price_change_performance, price_change_traffic_diagnostic, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
     from .interventions import (recent_interventions, record_action_proposal,
                                 record_adjustment_proposal, record_pricing_case,
                                 update_intervention_status)
 else:  # Supports `python app.py` from this directory.
     from analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
                            market_context, monthly_trend, overview, periods, ppc_periods, pnl_statement, seasonality_matrix,
-                           ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, price_change_performance, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
+                           ppc_change_impact, ppc_coverage, ppc_decisions, ppc_organic_trend, price_change_performance, price_change_traffic_diagnostic, pricing_case, prime_big_deals_performance, product_diagnostics, product_portfolio)
     from interventions import (recent_interventions, record_action_proposal,
                                record_adjustment_proposal, record_pricing_case,
                                update_intervention_status)
@@ -446,6 +446,96 @@ def prime_big_deals():
     return render_template("prime_big_deals.html",
                            page="prime_big_deals",
                            event=prime_big_deals_performance())
+
+
+@app.get("/sales-tree")
+def sales_tree():
+    fields = ("before_start", "before_end", "after_start", "after_end")
+    values = {key: request.args.get(key, "").strip() for key in fields}
+    comparison = None
+    error = None
+    if any(values.values()):
+        try:
+            if not all(values.values()):
+                raise ValueError("Enter all four dates.")
+            bs, be, start, end = (date.fromisoformat(values[key]) for key in fields)
+            if bs > be or start > end:
+                raise ValueError("Each start date must be on or before its end date.")
+            if be >= start:
+                raise ValueError("The baseline must end before the comparison period begins.")
+            from zoneinfo import ZoneInfo
+            last_day = datetime.now(ZoneInfo("America/Los_Angeles")).date() - timedelta(days=1)
+            if end > last_day:
+                raise ValueError("Choose completed Pacific calendar days only.")
+            if (be-bs).days >= 93 or (end-start).days >= 93:
+                raise ValueError("Each date range can contain up to 93 days.")
+            comparison = (bs, be, start, end)
+        except ValueError as exc:
+            error = str(exc) or "Enter valid dates."
+    if error:
+        return render_template("sales_tree.html", error=error, values=values), 400
+    result = price_change_performance(14, False, "weekday4", comparison=comparison)
+    before, after = result["before"], result["after"]
+    def metric(label, left, right, money=False, lower_better=False, detail=""):
+        delta = right-left if left is not None and right is not None else None
+        pct = delta/left if delta is not None and left is not None and left > 0 else None
+        direction = ("neutral" if delta is None or abs(delta)<1e-9 else
+                     "bad" if (delta > 0 if lower_better else delta < 0) else "good")
+        return {"label": label, "before":left, "after":right, "delta":delta,
+                "pct":pct, "money":money, "direction":direction, "detail":detail}
+    def per_day(row, key):
+        return row[key]/row["days"] if row["days"] else None
+    ad_complete = bool(result["ppc_cutoff"] and result["after_dates"]
+                       and result["ppc_cutoff"] >= max(result["after_dates"]))
+    profit = metric("Contribution after ads / day", before["contribution_after_ads_per_day"] if ad_complete else None,
+                    after["contribution_after_ads_per_day"] if ad_complete else None, True)
+    gross = metric("Contribution before ads / day", before["contribution_per_day"], after["contribution_per_day"], True)
+    ads = metric("Advertising spend / day", per_day(before,"ad_spend") if ad_complete else None,
+                 per_day(after,"ad_spend") if ad_complete else None, True, True)
+    revenue = metric("Revenue / day",before["revenue_per_day"],after["revenue_per_day"],True)
+    def costs(row):
+        return row["revenue_per_day"]-row["contribution_per_day"] if row["revenue_per_day"] is not None and row["contribution_per_day"] is not None else None
+    costs_metric = metric("Product costs + Amazon fees / day",costs(before),costs(after),True,True)
+    packs = metric("Packs sold / day",before["packs_per_day"],after["packs_per_day"])
+    price = metric("Realized price / pack",before["price_per_pack"],after["price_per_pack"],True)
+    pack_metrics = []
+    for p in result["pack_rows"]:
+        pack_metrics.append({"name":p["label"], "volume":metric("Packs / day",p["before"]["packs_per_day"],p["after"]["packs_per_day"]),
+                             "contribution":metric("Contribution before ads / day",p["before"]["contribution_per_day"],p["after"]["contribution_per_day"],True),
+                             "before_count":p["before"]["raw_packs"], "after_count":p["after"]["raw_packs"]})
+    bt, at = before["traffic"], after["traffic"]
+    traffic = metric("Sessions / day",bt["sessions"]/before["days"] if bt and before["days"] else None,
+                     at["sessions"]/after["days"] if at and after["days"] else None)
+    conversion = metric("Units ordered / session",bt["units_per_session"] if bt else None,at["units_per_session"] if at else None)
+    traffic_diagnostic = None
+    if comparison is None and (not bt or not at):
+        traffic_diagnostic = price_change_traffic_diagnostic()
+        if traffic_diagnostic:
+            d = traffic_diagnostic
+            traffic = metric("Sessions / day", d["before"]["sessions"]/7, d["after"]["sessions"]/7)
+            conversion = metric("Units ordered / session",d["before"]["units_per_session"],d["after"]["units_per_session"])
+    clicks = metric("Ad clicks / day",per_day(before,"ad_clicks") if ad_complete else None,per_day(after,"ad_clicks") if ad_complete else None)
+    cpc = metric("Cost / ad click",before["ad_spend"]/before["ad_clicks"] if ad_complete and before["ad_clicks"] else None,
+                 after["ad_spend"]/after["ad_clicks"] if ad_complete and after["ad_clicks"] else None,True,True)
+    drivers = []
+    for m, impact in ((gross, gross["delta"]), (ads, -ads["delta"] if ads["delta"] is not None else None)):
+        if impact is not None and impact < -1e-9:
+            drivers.append({"label":m["label"],"impact":impact})
+    drivers.sort(key=lambda x:x["impact"])
+    percentage_flags = [m for m in [profit, gross, ads, costs_metric, packs, price, revenue, clicks, cpc,
+                                   *([] if traffic_diagnostic else [traffic, conversion]),
+                                   *[x["volume"] | {"label": x["name"] + " packs / day"} for x in pack_metrics]]
+                        if m["pct"] is not None and m["direction"] == "bad"]
+    percentage_flags.sort(key=lambda m: abs(m["pct"]), reverse=True)
+    if not comparison:
+        values = {"before_start": result["before_dates"][0] if result["before_dates"] else "",
+                  "before_end": result["before_dates"][-1] if result["before_dates"] else "",
+                  "after_start":result["after_dates"][0] if result["after_dates"] else "",
+                  "after_end":result["after_dates"][-1] if result["after_dates"] else ""}
+    return render_template("sales_tree.html", analysis=result, values=values, custom=bool(comparison),
+                           profit=profit,gross=gross,ads=ads,revenue=revenue,costs=costs_metric,packs=packs,price=price,
+                           pack_metrics=pack_metrics,traffic=traffic,conversion=conversion,clicks=clicks,cpc=cpc,
+                           drivers=drivers,ad_complete=ad_complete,percentage_flags=percentage_flags[:3],traffic_diagnostic=traffic_diagnostic)
 
 
 @app.get("/price-change")
