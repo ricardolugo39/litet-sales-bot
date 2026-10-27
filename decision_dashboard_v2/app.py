@@ -490,6 +490,14 @@ def sales_tree():
     profit = metric("Contribution after ads / day", before["contribution_after_ads_per_day"] if ad_complete else None,
                     after["contribution_after_ads_per_day"] if ad_complete else None, True)
     gross = metric("Contribution before ads / day", before["contribution_per_day"], after["contribution_per_day"], True)
+    def margin(row, key):
+        revenue = row["revenue_per_day"]
+        contribution = row[key]
+        return contribution / revenue if revenue is not None and revenue > 0 and contribution is not None else None
+    gross_margin = metric("Margin before ads", margin(before, "contribution_per_day"),
+                          margin(after, "contribution_per_day"))
+    profit_margin = metric("Margin after ads", margin(before, "contribution_after_ads_per_day") if ad_complete else None,
+                           margin(after, "contribution_after_ads_per_day") if ad_complete else None)
     ads = metric("Advertising spend / day", per_day(before,"ad_spend") if ad_complete else None,
                  per_day(after,"ad_spend") if ad_complete else None, True, True)
     revenue = metric("Revenue / day",before["revenue_per_day"],after["revenue_per_day"],True)
@@ -533,7 +541,7 @@ def sales_tree():
                   "after_start":result["after_dates"][0] if result["after_dates"] else "",
                   "after_end":result["after_dates"][-1] if result["after_dates"] else ""}
     return render_template("sales_tree.html", analysis=result, values=values, custom=bool(comparison),
-                           profit=profit,gross=gross,ads=ads,revenue=revenue,costs=costs_metric,packs=packs,price=price,
+                           profit=profit,gross=gross,profit_margin=profit_margin,gross_margin=gross_margin,ads=ads,revenue=revenue,costs=costs_metric,packs=packs,price=price,
                            pack_metrics=pack_metrics,traffic=traffic,conversion=conversion,clicks=clicks,cpc=cpc,
                            drivers=drivers,ad_complete=ad_complete,percentage_flags=percentage_flags[:3],traffic_diagnostic=traffic_diagnostic)
 
