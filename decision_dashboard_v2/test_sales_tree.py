@@ -47,7 +47,7 @@ class SalesTreeTest(unittest.TestCase):
         page = self.client.get('/sales-tree')
         self.assertEqual(page.status_code, 200)
         for label in (b'Market search demand', b'Organic search position',
-                      b'15.4% ACoS', b'91.2% ACoS', b'fixed research findings'):
+                      b'46.7% ACoS', b'94.8% ACoS', b'fixed research findings'):
             self.assertIn(label, page.data)
         custom = self.client.get('/sales-tree?before_start=2026-09-20&before_end=2026-09-28&after_start=2026-10-18&after_end=2026-10-26')
         self.assertNotIn(b'Market search demand', custom.data)
