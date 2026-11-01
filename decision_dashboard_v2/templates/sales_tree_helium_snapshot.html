@@ -1,12 +1,18 @@
 <section class="section" id="helium-findings" aria-labelledby="helium-title">
-  <div class="eyebrow">Research snapshot · retrieved October 30, 2026</div>
-  <h2 id="helium-title">What Helium adds to the October 17 review</h2>
-  <p class="muted">These are fixed research findings, not a live Helium feed. Their dates and scope differ from the financial baseline above; they do not automatically update when sales data changes. The lines in the map identify questions, not proven causes.</p>
+  <div class="eyebrow">Helium 10 · daily snapshot</div>
+  <h2 id="helium-title">Search demand and visibility</h2>
+  {% if helium_tree %}
+  <p class="muted">Last captured {{helium_tree.captured_at}} · {{helium_tree.age_hours|number}} hours ago. {% if helium_tree.stale %}<strong>Snapshot is over 48 hours old; check the daily refresh.</strong>{% else %}This section reads the latest saved daily snapshot.{% endif %}</p>
   <div class="cards">
-    <div class="node"><h3>Search demand: recent estimates are steady</h3><p>Estimated trailing 30-day Amazon searches, reported Oct 17 → Oct 24:</p><p><b>Cycling socks:</b> 6,090 → 6,051 (−0.6%)<br><b>Cycling socks for men:</b> 1,934 → 2,005 (+3.7%)<br><b>White cycling socks:</b> 555 → 580 (+4.5%)</p><p class="caption">The Oct 24 point is the latest weekly history available at retrieval. These overlapping estimates are market context, not our sessions or a count of searches in one week. The earlier Oct 10 → Oct 17 estimates dropped substantially.</p></div>
-    <div class="node"><h3>Organic visibility held up</h3><p>Average observed organic rank for the tracked LITET parent, Oct 1–16 → Oct 18–29:</p><p><b>Cycling socks:</b> 26.3 → 19.0<br><b>White cycling socks:</b> 6.6 → 5.3</p><p class="caption">Lower is better. Snapshots do not measure impressions or visits. The white three-pack child ASIN was not individually tracked; parent rank cannot establish that variation's rank.</p></div>
-    <div class="node"><h3>Investigate how ad spend is used</h3><p><b>Cycling socks, phrase target:</b> 166 clicks, 21 attributed orders, $359.21 spend and $768.79 attributed sales (46.7% ACoS).</p><p><b>Road cycling socks men, broad target:</b> 42 clicks, 3 attributed orders, $82.41 spend and $86.97 attributed sales (94.8% ACoS).</p><p class="caption">Oct 1–22 target-level results from search-term reports, reviewed Oct 30; attribution can still change. Attributed purchases may include other products. Confirm the current target, bid and advertised product before changes. ACoS is ad spend ÷ ad-attributed sales; TACOS uses total sales.</p></div>
+    {% for phrase in ['cycling socks', 'cycling socks for men', 'white cycling socks'] %}
+    {% set kw = helium_tree.keywords.get(phrase) %}
+    <div class="node"><h3>{{phrase}}</h3>
+      {% if kw %}<p>Estimated monthly searches: <b>{{kw.search_volume|number if kw.search_volume is not none else 'Unavailable'}}</b><br>Estimated 30-day trend: <b>{{(kw.volume_trend_30d_pct / 100)|percent if kw.volume_trend_30d_pct is defined and kw.volume_trend_30d_pct is not none else 'Unavailable'}}</b><br>Parent organic rank: <b>{{kw.rank|number if kw.rank is not none else 'Unavailable'}}</b></p>
+      {% else %}<p>Unavailable in the daily snapshot.</p>{% endif %}
+    </div>
+    {% endfor %}
   </div>
-  <p><b>Takeaway:</b> Estimated demand fell before the change and was broadly stable in the latest weekly estimate, while the tracked parent's organic rank improved on these terms. Traffic, conversion and ad efficiency all need attention. Consider testing relevant traffic within the existing budget, then judge the result by contribution after ads, three-pack sales and TACOS.</p>
-  <p class="caption">* Search demand and organic rank: Helium 10 Keyword Research and Keyword Tracker. Campaign results: Decision Center Amazon advertising search-term data, with Helium Ads reviewed in Analytics-Only. No advertising settings were changed. Brand traffic reports may disagree on coverage; see the traffic warning below when present.</p>
+  <p class="caption">Search volumes and trends are Helium estimates, not measured sessions. Rank is a snapshot for LITET parent {{helium_tree.parent}}, not the three-pack child. It is not a before-and-after average. Lower positions are better. Daily refresh does not include historical Keyword Tracker series or every keyword.</p>
+  {% else %}<div class="data-gap">No usable daily Helium snapshot is available. The tree will show the latest data after a successful refresh.</div>{% endif %}
+  <p class="caption">For current targeting performance and bid decisions, review <a href="/ppc?brand=Litet">PPC analysis</a>. Ad-attributed sales can change as attribution matures, and incomplete advertising reports can affect contribution after ads.</p>
 </section>

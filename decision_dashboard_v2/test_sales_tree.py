@@ -43,11 +43,17 @@ class SalesTreeTest(unittest.TestCase):
         self.assertIn(f"{d['before']['sessions']:,.0f}".encode(), page.data)
         self.assertIn(f"{d['after']['sessions']:,.0f}".encode(), page.data)
 
-    def test_helium_snapshot_is_labeled_and_not_used_for_custom_dates(self):
-        page = self.client.get('/sales-tree')
-        self.assertEqual(page.status_code, 200)
-        for label in (b'Market search demand', b'Organic search position',
-                      b'46.7% ACoS', b'94.8% ACoS', b'fixed research findings'):
-            self.assertIn(label, page.data)
-        custom = self.client.get('/sales-tree?before_start=2026-09-20&before_end=2026-09-28&after_start=2026-10-18&after_end=2026-10-26')
-        self.assertNotIn(b'Market search demand', custom.data)
+    def test_helium_snapshot_is_live_and_not_used_for_custom_dates(self):
+        from decision_dashboard_v2.app import sales_tree_helium
+        snapshot = {"captured_at": "2026-10-30T12:00:00Z", "brands": {"Litet": {
+            "parent_asin": "B0DSCFD253", "keywords": [{"phrase": "cycling socks", "search_volume": 12345, "rank": 24, "volume_trend_30d_pct": -18}]}}}
+        with patch('decision_dashboard_v2.app.latest_snapshot', return_value=snapshot):
+            page = self.client.get('/sales-tree')
+            self.assertEqual(page.status_code, 200)
+            for label in (b'Market search demand', b'Organic search position', b'12,345', b'2026-10-30', b'Unavailable in the daily snapshot'):
+                self.assertIn(label, page.data)
+            custom = self.client.get('/sales-tree?before_start=2026-09-20&before_end=2026-09-28&after_start=2026-10-18&after_end=2026-10-26')
+            self.assertNotIn(b'Market search demand', custom.data)
+        self.assertIsNone(sales_tree_helium(None))
+        self.assertTrue(sales_tree_helium(snapshot, datetime(2026, 11, 3, tzinfo=ZoneInfo('UTC')))['stale'])
+        self.assertFalse(sales_tree_helium(snapshot, datetime(2026, 10, 31, tzinfo=ZoneInfo('UTC')))['stale'])

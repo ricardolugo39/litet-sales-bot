@@ -15,9 +15,9 @@ if not __package__:
 from flask import Flask, after_this_request, redirect, render_template, request, send_file, url_for, session, abort
 
 if __package__:
-    from .helium_store import save_snapshot
+    from .helium_store import save_snapshot, latest_snapshot
 else:
-    from helium_store import save_snapshot
+    from helium_store import save_snapshot, latest_snapshot
 
 if __package__:
     from .analytics import (action_queue, advertising_detail, brand_split, cost_diagnosis, executive_actions, executive_diagnosis, family_diagnostics, keyword_opportunities, keyword_playbook,
@@ -448,6 +448,25 @@ def prime_big_deals():
                            event=prime_big_deals_performance())
 
 
+def sales_tree_helium(snapshot, now=None):
+    """Describe the latest saved LITET snapshot without inventing comparison history."""
+    if not snapshot:
+        return None
+    try:
+        captured = datetime.fromisoformat(snapshot["captured_at"].replace("Z", "+00:00"))
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=timezone.utc)
+        rows = snapshot["brands"]["Litet"]["keywords"]
+        keywords = {r["phrase"].strip().lower(): r for r in rows}
+        now = now or datetime.now(timezone.utc)
+        age = max(0, (now - captured).total_seconds() / 3600)
+        return {"captured_at": captured.isoformat(), "age_hours": age,
+                "stale": age > 48, "keywords": keywords,
+                "parent": snapshot["brands"]["Litet"]["parent_asin"]}
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
 @app.get("/sales-tree")
 def sales_tree():
     fields = ("before_start", "before_end", "after_start", "after_end")
@@ -540,7 +559,8 @@ def sales_tree():
                   "before_end": result["before_dates"][-1] if result["before_dates"] else "",
                   "after_start":result["after_dates"][0] if result["after_dates"] else "",
                   "after_end":result["after_dates"][-1] if result["after_dates"] else ""}
-    return render_template("sales_tree.html", analysis=result, values=values, custom=bool(comparison),
+    helium_tree = sales_tree_helium(latest_snapshot(os.getenv("LITET_DB_PATH", str(Path(__file__).with_name("data") / "litet.db"))))
+    return render_template("sales_tree.html", analysis=result, values=values, custom=bool(comparison), helium_tree=helium_tree,
                            profit=profit,gross=gross,profit_margin=profit_margin,gross_margin=gross_margin,ads=ads,revenue=revenue,costs=costs_metric,packs=packs,price=price,
                            pack_metrics=pack_metrics,traffic=traffic,conversion=conversion,clicks=clicks,cpc=cpc,
                            drivers=drivers,ad_complete=ad_complete,percentage_flags=percentage_flags[:3],traffic_diagnostic=traffic_diagnostic)
