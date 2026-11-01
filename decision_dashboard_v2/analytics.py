@@ -2046,6 +2046,12 @@ def keyword_opportunities(period_start, period_end, brand):
     return sorted(output,key=lambda r:r["priority"],reverse=True)
 
 
+def previous_month_comparison(current_start, current_end):
+    """Compare the same calendar days, capped at the preceding month's end."""
+    month_end = current_start.replace(day=1) - timedelta(days=1)
+    return month_end.replace(day=1), month_end.replace(day=min(current_end.day, month_end.day))
+
+
 def executive_actions(period_start, period_end, brand, ranked_actions):
     if not ranked_actions:
         return {"headline":"No material intervention is supported","steps":[],"evidence":""}
@@ -2118,8 +2124,7 @@ def executive_actions(period_start, period_end, brand, ranked_actions):
     from datetime import date, timedelta
     current_start_date=date.fromisoformat(current_start)
     current_end_date=date.fromisoformat(current_end)
-    prior_end=(current_start_date-timedelta(days=1)).replace(day=current_end_date.day)
-    prior_start=prior_end.replace(day=1)
+    prior_start,prior_end=previous_month_comparison(current_start_date,current_end_date)
     ppc=ppc_decisions(current_start,current_end,brand)
     productive=[r for r in ppc if r["orders"]>=1 and r["acos"] is not None and r["acos"]<=.35]
     inefficient=[r for r in ppc if r["clicks"]>=8 and r["acos"] is not None and r["acos"]>1]
